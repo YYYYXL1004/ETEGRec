@@ -1,0 +1,7 @@
+# torch==2.4.0+cu121
+numpy
+accelerate
+# faiss
+tqdm
+scikit-learn
+transformers
