@@ -1,0 +1,9 @@
+# .gitignore
+
+logs/
+myckpt/
+dataset/
+__pycache__/
+
+*.pth
+*.pyc
