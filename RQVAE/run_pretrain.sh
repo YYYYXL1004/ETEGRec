@@ -1,7 +1,7 @@
 
-DATASET=scientific
+DATASET=instrument
 
-DEVICE="cuda:0"
+DEVICE="cuda:3,5,6,7"
 
 
 python -u main.py \
