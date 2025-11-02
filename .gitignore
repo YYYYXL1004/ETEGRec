@@ -5,5 +5,6 @@ myckpt/
 dataset/
 __pycache__/
 
+docs/
 *.pth
 *.pyc

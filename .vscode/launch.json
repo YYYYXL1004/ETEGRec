@@ -4,8 +4,25 @@
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        
-        
+        {
+            "name": "Debug ETEGRec instrument",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--config",
+                "./config/instrument.yaml",
+                "--lr_rec=0.005",
+                "--lr_id=0.0001",
+                "--cycle=2",
+                "--eval_step=2",
+                "--rec_kl_loss=0.0001",
+                "--rec_dec_cl_loss=0.0003",
+                "--id_kl_loss=0.0001",
+                "--id_dec_cl_loss=0.0003"
+            ]
+        },
         {
             "name": "Python 调试程序: 包含参数的当前文件",
             "type": "debugpy",

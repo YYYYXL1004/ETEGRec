@@ -24,7 +24,9 @@ class Model(nn.Module, GenerationMixin):
     def __init__(self, config, model, n_items, code_length=1, code_number=256):
         super().__init__()
         self.model = model
-        self._supports_cache_class = model._supports_cache_class
+        if hasattr(model, '_supports_cache_class'):
+            self._supports_cache_class = model._supports_cache_class
+        # self._supports_cache_class = model._supports_cache_class
         self.config = model.config
         self.base_model_prefix = "model"
         self.generation_config = model.generation_config

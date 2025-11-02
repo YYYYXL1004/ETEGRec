@@ -1,7 +1,7 @@
 
 DATASET=instrument
 
-DEVICE="cuda:3,5,6,7"
+DEVICE="cuda:7"
 
 
 python -u main.py \
