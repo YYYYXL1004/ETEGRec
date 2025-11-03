@@ -111,7 +111,7 @@ class Trainer(object):
         for batch_idx, data in enumerate(iter_data):
             data = data.to(self.device)
             self.optimizer.zero_grad()
-            out, rq_loss, indices = self.model(data)
+            out, rq_loss, indices, _, _ = self.model(data)
             loss, loss_recon = self.model.compute_loss(out, rq_loss, xs=data)
             self._check_nan(loss)
             loss.backward()
@@ -163,7 +163,7 @@ class Trainer(object):
             "state_dict": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
         }
-        torch.save(state, ckpt_path, pickle_protocol=4)
+        torch.save(state["state_dict"], ckpt_path, pickle_protocol=4)
 
         self.logger.info(
             set_color("Saving current", "blue") + f": {ckpt_path}"
