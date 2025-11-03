@@ -9,7 +9,7 @@ os.environ["TORCH_USE_CUDA_DSA"]="1"
 from torch.utils.data import DataLoader
 
 from datasets import EmbDataset
-from models.rqvae import RQVAE
+from vq import RQVAE
 from trainer import  Trainer
 
 def parse_args():
@@ -82,7 +82,8 @@ if __name__ == '__main__':
 
     """build dataset"""
     data = EmbDataset(args.data_path)
-    model = RQVAE(args=args, in_dim=data.dim)
+    model = RQVAE(config=vars(args), in_dim=data.dim)
+    # model = RQVAE(args=args, in_dim=data.dim)
     print(model)
     data_loader = DataLoader(data,num_workers=args.num_workers,
                              batch_size=args.batch_size, shuffle=True,
