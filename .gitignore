@@ -1,8 +1,9 @@
 # .gitignore
 
-logs/
-myckpt/
-dataset/
+logs/*
+myckpt/*
+dataset/*
+!dataset/data_preprocess.py
 __pycache__/
 
 RQVAE/__pycache__
