@@ -5,6 +5,8 @@ myckpt/
 dataset/
 __pycache__/
 
+RQVAE/__pycache__
+RecRole/
 docs/
 *.pth
 *.pyc
