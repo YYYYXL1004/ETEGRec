@@ -1,5 +1,5 @@
 
-DATASET=instrument
+DATASET=scientific
 
 DEVICE="cuda:7"
 
