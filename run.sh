@@ -1,4 +1,4 @@
-DATASET=scientific
+DATASET=instrument
 
 
 accelerate launch --config_file accelerate_config_ddp.yaml main.py \

@@ -1,0 +1,214 @@
+from recbole.quick_start import run_recbole
+from recbole.config import Config
+from recbole.data import create_dataset, data_preparation
+from recbole.model.sequential_recommender import SASRec
+from recbole.trainer import Trainer
+import torch
+import numpy as np
+import json
+import os
+
+def train_and_extract_embeddings():
+    """
+    训练 SASRec 并提取物品嵌入
+    """
+    print("=" * 60)
+    print("🎵 SASRec 训练 - Musical Instruments 2023")
+    print("=" * 60)
+    
+    # ============ 配置 ============
+    config_dict = {
+        # 数据集配置
+        'model': 'SASRec',
+        'dataset': 'Instruments2023',
+        'data_path': './dataset/',
+        'USER_ID_FIELD': 'user_id',
+        'ITEM_ID_FIELD': 'item_id',
+        'RATING_FIELD': 'rating',
+        'TIME_FIELD': 'timestamp',
+        'load_col': {
+            'inter': ['user_id', 'item_id', 'rating', 'timestamp']
+        },
+        
+        # 数据划分策略
+        'eval_args': {
+            'split': {'LS': 'valid_and_test'},  # Leave-one-out 策略
+            'order': 'TO',  # 按时间排序
+            'group_by': 'user',
+            'mode': 'full'  # 全排序模式
+        },
+        
+        # SASRec 模型参数
+        'hidden_size': 256,          # 嵌入维度 (与 ETEGRec 一致)
+        'inner_size': 256,           # FFN 隐藏层大小
+        'n_layers': 2,               # Transformer 层数
+        'n_heads': 2,                # 注意力头数
+        'hidden_dropout_prob': 0.5,  # Dropout 率
+        'attn_dropout_prob': 0.5,
+        'hidden_act': 'gelu',        # 激活函数
+        'layer_norm_eps': 1e-12,
+        'initializer_range': 0.02,
+        'loss_type': 'CE',           # 损失函数：交叉熵
+        'max_seq_length': 50,        # 最大序列长度
+        
+        # 🔧 修复：禁用负采样（CE损失不需要）
+        'train_neg_sample_args': None,
+        
+        # 训练参数
+        'epochs': 300,
+        'train_batch_size': 2048,
+        'eval_batch_size': 2048,
+        'learner': 'adam',
+        'learning_rate': 0.001,
+        
+        # 评估参数
+        'eval_step': 1,
+        'stopping_step': 10,
+        'metrics': ['Recall', 'NDCG', 'Hit', 'MRR'],
+        'topk': [5, 10, 20],
+        'valid_metric': 'NDCG@10',
+        'metric_decimal_place': 4,
+        
+        # GPU 配置
+        'gpu_id': '3',
+        'use_gpu': True,
+        
+        # 保存配置
+        'checkpoint_dir': './saved/SASRec',
+        'show_progress': True,
+    }
+    
+    try:
+        # ============ 加载数据 ============
+        print("\n🔧 正在加载数据集...")
+        config = Config(model='SASRec', dataset='Instruments2023', config_dict=config_dict)
+        dataset = create_dataset(config)
+        
+        print(f"✅ 数据集加载成功!")
+        print(f"   用户数: {dataset.user_num}")
+        print(f"   物品数: {dataset.item_num}")
+        print(f"   交互数: {dataset.inter_num}")
+        
+        train_data, valid_data, test_data = data_preparation(config, dataset)
+        
+        # ============ 创建模型 ============
+        print("\n🤖 正在创建 SASRec 模型...")
+        model = SASRec(config, train_data.dataset).to(config['device'])
+        print(f"   设备: {config['device']}")
+        print(f"   模型参数量: {sum(p.numel() for p in model.parameters()):,}")
+        
+        # ============ 训练 ============
+        print("\n🚀 开始训练...")
+        print(f"   总轮数: {config['epochs']}")
+        print(f"   Batch Size: {config['train_batch_size']}")
+        print(f"   学习率: {config['learning_rate']}")
+        print(f"   早停步数: {config['stopping_step']}")
+        
+        trainer = Trainer(config, model)
+        best_valid_score, best_valid_result = trainer.fit(
+            train_data, valid_data,
+            saved=True,
+            show_progress=config['show_progress']
+        )
+        
+        print(f"\n✅ 训练完成!")
+        print(f"   最佳验证 {config['valid_metric']}: {best_valid_score:.4f}")
+        
+        # ============ 测试 ============
+        print("\n📊 在测试集上评估...")
+        test_result = trainer.evaluate(test_data, load_best_model=True, show_progress=True)
+        print(f"   测试结果:")
+        for metric, value in test_result.items():
+            print(f"      {metric}: {value:.4f}")
+        
+        # ============ 提取嵌入 ============
+        print("\n💾 正在提取物品嵌入...")
+        
+        # 获取训练好的 item embedding
+        item_embedding = model.item_embedding.weight.data.cpu().numpy()
+        print(f"   原始嵌入形状: {item_embedding.shape}")
+        
+        # 去掉 padding token (索引 0)
+        item_embedding_no_pad = item_embedding[1:]
+        print(f"   去除 padding 后: {item_embedding_no_pad.shape}")
+        
+        # ============ 保存文件 ============
+        output_dir = './dataset/Instruments2023'
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 1. 保存 .npy 嵌入文件
+        npy_path = os.path.join(output_dir, 'Instruments2023_emb_256.npy')
+        np.save(npy_path, item_embedding_no_pad)
+        print(f"\n✅ 嵌入文件已保存: {npy_path}")
+        print(f"   形状: {item_embedding_no_pad.shape}")
+        print(f"   大小: {item_embedding_no_pad.nbytes / 1024 / 1024:.2f} MB")
+        
+        # 2. 生成 item2id 映射 (ETEGRec 格式)
+        # RecBole 的 token2id 映射
+        item_token2id = dataset.field2token_id['item_id']
+        
+        # 转换为 ETEGRec 需要的格式 (去掉 padding)
+        item2id_etegrec = {}
+        for token, idx in item_token2id.items():
+            if idx > 0:  # 跳过 padding (idx=0)
+                item2id_etegrec[str(token)] = int(idx)
+        
+        # 保存为 .emb_map.json
+        map_path = os.path.join(output_dir, 'Instruments2023.emb_map.json')
+        with open(map_path, 'w') as f:
+            json.dump(item2id_etegrec, f, indent=2)
+        print(f"✅ Item2ID 映射已保存: {map_path}")
+        print(f"   物品数: {len(item2id_etegrec)}")
+        
+        # ============ 验证 ============
+        print("\n🔍 验证生成的文件...")
+        
+        # 验证嵌入文件
+        loaded_emb = np.load(npy_path)
+        assert loaded_emb.shape == item_embedding_no_pad.shape, "嵌入形状不匹配!"
+        
+        # 验证映射文件
+        with open(map_path, 'r') as f:
+            loaded_map = json.load(f)
+        
+        assert len(loaded_map) == loaded_emb.shape[0], \
+            f"映射数量 ({len(loaded_map)}) 与嵌入数量 ({loaded_emb.shape[0]}) 不匹配!"
+        
+        print("✅ 所有验证通过!")
+        
+        # ============ 总结 ============
+        print("\n" + "=" * 60)
+        print("🎉 训练和提取完成!")
+        print("=" * 60)
+        print(f"\n📁 生成的文件:")
+        print(f"   1. {npy_path}")
+        print(f"      - 形状: {loaded_emb.shape}")
+        print(f"      - 用途: ETEGRec 的 semantic_emb_path")
+        print(f"\n   2. {map_path}")
+        print(f"      - 物品数: {len(loaded_map)}")
+        print(f"      - 用途: ETEGRec 的 map_path")
+        
+        print(f"\n📊 模型性能:")
+        print(f"   验证集 {config['valid_metric']}: {best_valid_score:.4f}")
+        for metric, value in test_result.items():
+            print(f"   测试集 {metric}: {value:.4f}")
+        
+        print("\n" + "=" * 60)
+        
+        return model, dataset, item_embedding_no_pad, test_result
+        
+    except Exception as e:
+        print(f"\n❌ 错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None, None
+
+if __name__ == '__main__':
+    model, dataset, embeddings, test_result = train_and_extract_embeddings()
+    
+    if model is not None:
+        print("\n✨ 下一步: 准备 ETEGRec 的训练数据!")
+        print("   需要生成以下文件:")
+        print("   - Instruments2023.train.jsonl")
+        print("   - Instruments2023.valid.jsonl")
+        print("   - Instruments2023.test.jsonl")
