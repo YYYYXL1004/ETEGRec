@@ -3,6 +3,7 @@ import pandas as pd
 import os
 from collections import defaultdict
 from tqdm import tqdm
+import numpy as np
 
 def load_recbole_interactions(inter_file):
     """
@@ -31,16 +32,18 @@ def load_recbole_interactions(inter_file):
     print(f"✅ 读取了 {len(df)} 条交互")
     return df
 
-def split_sequences_by_user(df):
+def split_sequences_by_user(df, max_seq_length=50):
     """
     按用户划分数据，使用 leave-one-out 策略
-    每个用户的交互序列：
-    - 训练集：每个时间点的增量序列（历史 -> 下一个物品）
-    - 验证集：前 n-2 个 -> 倒数第2个物品
-    - 测试集：前 n-1 个 -> 最后一个物品
+    🔧 限制序列最大长度（与作者一致）
+    
+    Args:
+        df: 交互数据
+        max_seq_length: 最大序列长度（默认50）
     """
     print(f"\n🔪 正在划分数据集...")
-    print(f"   策略: Leave-one-out (每个用户最后2个交互作为验证和测试)")
+    print(f"   策略: Leave-one-out")
+    print(f"   最大序列长度: {max_seq_length}")
     
     # 按用户和时间排序
     df = df.sort_values(['user_id', 'timestamp']).reset_index(drop=True)
@@ -58,7 +61,8 @@ def split_sequences_by_user(df):
         'train_users': 0,
         'valid_users': 0,
         'test_users': 0,
-        'skipped_users': 0
+        'skipped_users': 0,
+        'truncated_sequences': 0
     }
     
     for user_id, group in tqdm(user_groups, desc="处理用户"):
@@ -67,65 +71,70 @@ def split_sequences_by_user(df):
         n = len(interactions)
         
         if n < 3:
-            # 交互太少（少于3个），跳过该用户
             stats['skipped_users'] += 1
             continue
         
         # ============ 训练集：增量序列 ============
-        # 从第2个交互开始到倒数第3个交互，每个位置都生成一个训练样本
-        # 例如：[A, B, C, D, E] -> 
-        #   {history: [A], target: B}
-        #   {history: [A, B], target: C}
-        #   {history: [A, B, C], target: D} (不包括最后两个)
-        for i in range(1, n - 2):  # 从索引1到n-3
+        for i in range(1, n - 2):
+            # 🔧 限制历史长度
+            history = interactions[:i]
+            if len(history) > max_seq_length:
+                history = history[-max_seq_length:]
+                stats['truncated_sequences'] += 1
+            
             train_sequences.append({
                 'user_id': user_id,
-                'inter_history': interactions[:i],
+                'inter_history': history,
                 'target_id': interactions[i]
             })
         
-        if n > 3:  # 至少有4个交互才有训练数据
+        if n > 3:
             stats['train_users'] += 1
         
         # ============ 验证集 ============
-        # 使用前 n-2 个作为历史，倒数第2个作为目标
-        # 例如：[A, B, C, D, E] -> {history: [A, B, C], target: D}
+        valid_history = interactions[:-2]
+        if len(valid_history) > max_seq_length:
+            valid_history = valid_history[-max_seq_length:]
+            stats['truncated_sequences'] += 1
+        
         valid_sequences.append({
             'user_id': user_id,
-            'inter_history': interactions[:-2],
+            'inter_history': valid_history,
             'target_id': interactions[-2]
         })
         stats['valid_users'] += 1
         
         # ============ 测试集 ============
-        # 使用前 n-1 个作为历史，最后一个作为目标
-        # 例如：[A, B, C, D, E] -> {history: [A, B, C, D], target: E}
+        test_history = interactions[:-1]
+        if len(test_history) > max_seq_length:
+            test_history = test_history[-max_seq_length:]
+            stats['truncated_sequences'] += 1
+        
         test_sequences.append({
             'user_id': user_id,
-            'inter_history': interactions[:-1],
+            'inter_history': test_history,
             'target_id': interactions[-1]
         })
         stats['test_users'] += 1
     
     print(f"\n✅ 数据划分完成:")
-    print(f"   总用户数: {stats['total_users']}")
-    print(f"   训练集序列: {len(train_sequences)} (来自 {stats['train_users']} 个用户)")
-    print(f"   验证集序列: {len(valid_sequences)} (来自 {stats['valid_users']} 个用户)")
-    print(f"   测试集序列: {len(test_sequences)} (来自 {stats['test_users']} 个用户)")
-    print(f"   跳过用户: {stats['skipped_users']} (交互少于3次)")
+    print(f"   总用户数: {stats['total_users']:,}")
+    print(f"   训练集序列: {len(train_sequences):,} (来自 {stats['train_users']:,} 个用户)")
+    print(f"   验证集序列: {len(valid_sequences):,} (来自 {stats['valid_users']:,} 个用户)")
+    print(f"   测试集序列: {len(test_sequences):,} (来自 {stats['test_users']:,} 个用户)")
+    print(f"   跳过用户: {stats['skipped_users']:,} (交互少于3次)")
+    print(f"   截断序列: {stats['truncated_sequences']:,} (超过 {max_seq_length} 长度)")
     
     return train_sequences, valid_sequences, test_sequences
 
 def save_jsonl(data, output_file):
     """
     保存为 JSONL 格式
-    格式：{"user_id": "xxx", "target_id": "xxx", "inter_history": [...]}
     """
     print(f"💾 正在保存到: {output_file}")
     
     with open(output_file, 'w', encoding='utf-8') as f:
         for item in data:
-            # 按照作者的格式：user_id, target_id, inter_history 的顺序
             json_obj = {
                 'user_id': item['user_id'],
                 'target_id': item['target_id'],
@@ -135,70 +144,54 @@ def save_jsonl(data, output_file):
     
     print(f"✅ 已保存 {len(data)} 条记录")
 
-def load_item2id_mapping(map_file):
+def verify_data(train_seqs, valid_seqs, test_seqs, max_seq_length):
     """
-    加载 item2id 映射
+    验证数据质量
     """
-    print(f"\n📖 正在读取 item2id 映射: {map_file}")
+    print(f"\n{'='*70}")
+    print(f"🔍 数据质量验证")
+    print(f"{'='*70}")
     
-    with open(map_file, 'r', encoding='utf-8') as f:
-        item2id = json.load(f)
+    all_seqs = train_seqs + valid_seqs + test_seqs
     
-    print(f"✅ 读取了 {len(item2id)} 个物品的映射")
-    return item2id
-
-def verify_consistency(train_seqs, valid_seqs, test_seqs, item2id):
-    """
-    验证数据一致性
-    """
-    print(f"\n🔍 验证数据一致性...")
+    # 检查1: 历史长度
+    hist_lens = [len(seq['inter_history']) for seq in all_seqs]
+    max_len = max(hist_lens)
     
-    # 收集所有出现的物品
-    all_items = set()
-    for seq in train_seqs + valid_seqs + test_seqs:
-        all_items.update(seq['inter_history'])
-        all_items.add(seq['target_id'])
-    
-    print(f"   数据中的物品数: {len(all_items)}")
-    print(f"   映射中的物品数: {len(item2id)}")
-    
-    # 检查是否所有物品都在映射中
-    missing_items = all_items - set(item2id.keys())
-    if missing_items:
-        print(f"⚠️  警告: 有 {len(missing_items)} 个物品不在映射中")
-        print(f"   示例: {list(missing_items)[:5]}")
+    print(f"\n✅ 历史长度检查:")
+    print(f"   最大长度: {max_len}")
+    print(f"   限制长度: {max_seq_length}")
+    if max_len <= max_seq_length:
+        print(f"   ✅ 所有序列长度都在限制范围内")
     else:
-        print(f"✅ 所有物品都在映射中")
+        print(f"   ❌ 发现超长序列！")
     
-    return len(missing_items) == 0
-
-def print_statistics(sequences, dataset_name):
-    """
-    打印数据集统计信息
-    """
-    if len(sequences) == 0:
-        print(f"\n{dataset_name}:")
-        print(f"  序列数量: 0")
-        return
+    # 检查2: 空历史
+    empty_count = sum(1 for seq in all_seqs if len(seq['inter_history']) == 0)
+    print(f"\n✅ 空历史检查:")
+    print(f"   空历史序列数: {empty_count}")
+    if empty_count == 0:
+        print(f"   ✅ 没有空历史序列")
+    else:
+        print(f"   ❌ 发现 {empty_count} 个空历史序列")
     
-    hist_lens = [len(seq['inter_history']) for seq in sequences]
-    unique_users = len(set(seq['user_id'] for seq in sequences))
-    
-    print(f"\n{dataset_name}:")
-    print(f"  序列数量: {len(sequences)}")
-    print(f"  唯一用户数: {unique_users}")
-    print(f"  平均历史长度: {sum(hist_lens)/len(hist_lens):.2f}")
-    print(f"  最小历史长度: {min(hist_lens)}")
-    print(f"  最大历史长度: {max(hist_lens)}")
+    # 检查3: 统计分布
+    print(f"\n✅ 统计分布:")
+    for name, seqs in [('训练集', train_seqs), ('验证集', valid_seqs), ('测试集', test_seqs)]:
+        lens = [len(s['inter_history']) for s in seqs]
+        print(f"   {name}:")
+        print(f"      平均长度: {np.mean(lens):.2f}")
+        print(f"      中位数: {np.median(lens):.2f}")
+        print(f"      最大长度: {np.max(lens)}")
 
 def main():
     """
     主函数
     """
     print("=" * 70)
-    print("🎵 ETEGRec 数据准备工具 - Musical Instruments 2023")
+    print("🎵 ETEGRec 数据准备工具 - Musical Instruments 2023 (优化版)")
     print("=" * 70)
-    print(f"当前时间: 2025-11-14 08:28:01 UTC")
+    print(f"当前时间: 2025-11-14 09:12:40 UTC")
     print(f"用户: YYYYXL1004")
     print("=" * 70)
     
@@ -209,29 +202,48 @@ def main():
     OUTPUT_DIR = BASE_DIR
     DATASET_NAME = 'Instruments2023'
     
+    # 🔧 关键参数（与作者对齐）
+    MAX_SEQ_LENGTH = 50  # 限制序列最大长度为50
+    
+    print(f"\n⚙️  配置参数:")
+    print(f"   最大序列长度: {MAX_SEQ_LENGTH} (与作者一致)")
+    
     # 检查文件
     if not os.path.exists(INTER_FILE):
-        print(f"❌ 错误: 找不到交互文件 {INTER_FILE}")
+        print(f"\n❌ 错误: 找不到交互文件 {INTER_FILE}")
         return
     
     if not os.path.exists(MAP_FILE):
-        print(f"❌ 错误: 找不到映射文件 {MAP_FILE}")
+        print(f"\n❌ 错误: 找不到映射文件 {MAP_FILE}")
         print(f"   请先运行 train_sasrec_instruments.py 生成映射文件")
         return
     
     # ============ 步骤 1: 加载数据 ============
     df = load_recbole_interactions(INTER_FILE)
-    item2id = load_item2id_mapping(MAP_FILE)
     
-    # ============ 步骤 2: 划分数据集并构建序列 ============
-    train_sequences, valid_sequences, test_sequences = split_sequences_by_user(df)
+    # 检查映射
+    print(f"\n📖 正在读取 item2id 映射: {MAP_FILE}")
+    with open(MAP_FILE, 'r', encoding='utf-8') as f:
+        item2id = json.load(f)
+    print(f"✅ 映射条目数: {len(item2id)}")
+    if '[PAD]' in item2id:
+        print(f"   包含 [PAD] token: ✅")
+    else:
+        print(f"   ⚠️  警告: 映射不包含 [PAD] token")
     
-    # ============ 步骤 3: 验证一致性 ============
-    verify_consistency(train_sequences, valid_sequences, test_sequences, item2id)
+    # ============ 步骤 2: 划分数据集 ============
+    train_sequences, valid_sequences, test_sequences = split_sequences_by_user(
+        df, 
+        max_seq_length=MAX_SEQ_LENGTH
+    )
+    
+    # ============ 步骤 3: 验证数据 ============
+    verify_data(train_sequences, valid_sequences, test_sequences, MAX_SEQ_LENGTH)
     
     # ============ 步骤 4: 保存文件 ============
-    print("\n" + "=" * 70)
-    print("保存 JSONL 文件...")
+    print(f"\n{'='*70}")
+    print(f"💾 保存文件...")
+    print(f"{'='*70}")
     
     train_file = os.path.join(OUTPUT_DIR, f'{DATASET_NAME}.train.jsonl')
     valid_file = os.path.join(OUTPUT_DIR, f'{DATASET_NAME}.valid.jsonl')
@@ -242,118 +254,52 @@ def main():
     save_jsonl(test_sequences, test_file)
     
     # ============ 步骤 5: 显示样例 ============
-    print("\n" + "=" * 70)
-    print("📊 数据样例:")
-    print("=" * 70)
+    print(f"\n{'='*70}")
+    print(f"📊 数据样例")
+    print(f"{'='*70}")
     
-    if len(train_sequences) > 0:
-        print("\n训练集样例:")
-        for i, seq in enumerate(train_sequences[:3]):
-            print(f"  样例 {i+1}:")
-            print(f"    User ID: {seq['user_id']}")
-            print(f"    历史长度: {len(seq['inter_history'])}")
-            hist_display = seq['inter_history'][:5]
-            if len(seq['inter_history']) > 5:
-                print(f"    历史: {hist_display}...")
-            else:
-                print(f"    历史: {seq['inter_history']}")
-            print(f"    目标: {seq['target_id']}")
-            # 显示完整的 JSON 格式
-            json_str = json.dumps({
-                'user_id': seq['user_id'],
-                'target_id': seq['target_id'],
-                'inter_history': seq['inter_history'][:3] + (['...'] if len(seq['inter_history']) > 3 else [])
-            }, ensure_ascii=False)
-            print(f"    JSON: {json_str}")
+    print(f"\n训练集前3条:")
+    for i, seq in enumerate(train_sequences[:3], 1):
+        hist_str = str(seq['inter_history'][:3])
+        if len(seq['inter_history']) > 3:
+            hist_str = hist_str[:-1] + ', ...]'
+        print(f"   {i}. user={seq['user_id'][:20]}..., target={seq['target_id']}, history_len={len(seq['inter_history'])}, history={hist_str}")
     
-    if len(valid_sequences) > 0:
-        print("\n验证集样例:")
-        for i, seq in enumerate(valid_sequences[:3]):
-            print(f"  样例 {i+1}:")
-            print(f"    User ID: {seq['user_id']}")
-            print(f"    历史长度: {len(seq['inter_history'])}")
-            hist_display = seq['inter_history'][:5]
-            if len(seq['inter_history']) > 5:
-                print(f"    历史: {hist_display}...")
-            else:
-                print(f"    历史: {seq['inter_history']}")
-            print(f"    目标: {seq['target_id']}")
-            # 显示完整的 JSON 格式
-            json_str = json.dumps({
-                'user_id': seq['user_id'],
-                'target_id': seq['target_id'],
-                'inter_history': seq['inter_history'][:3] + (['...'] if len(seq['inter_history']) > 3 else [])
-            }, ensure_ascii=False)
-            print(f"    JSON: {json_str}")
-    
-    if len(test_sequences) > 0:
-        print("\n测试集样例:")
-        for i, seq in enumerate(test_sequences[:3]):
-            print(f"  样例 {i+1}:")
-            print(f"    User ID: {seq['user_id']}")
-            print(f"    历史长度: {len(seq['inter_history'])}")
-            hist_display = seq['inter_history'][:5]
-            if len(seq['inter_history']) > 5:
-                print(f"    历史: {hist_display}...")
-            else:
-                print(f"    历史: {seq['inter_history']}")
-            print(f"    目标: {seq['target_id']}")
-            # 显示完整的 JSON 格式
-            json_str = json.dumps({
-                'user_id': seq['user_id'],
-                'target_id': seq['target_id'],
-                'inter_history': seq['inter_history'][:3] + (['...'] if len(seq['inter_history']) > 3 else [])
-            }, ensure_ascii=False)
-            print(f"    JSON: {json_str}")
-    
-    # ============ 步骤 6: 统计信息 ============
-    print("\n" + "=" * 70)
-    print("📈 数据统计:")
-    print("=" * 70)
-    
-    print_statistics(train_sequences, "训练集")
-    print_statistics(valid_sequences, "验证集")
-    print_statistics(test_sequences, "测试集")
-    
-    # ============ 步骤 7: 验证文件格式 ============
-    print("\n" + "=" * 70)
-    print("🔍 验证生成的文件格式...")
-    print("=" * 70)
-    
-    # 读取第一行验证
-    for name, file_path in [('训练集', train_file), ('验证集', valid_file), ('测试集', test_file)]:
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                first_line = f.readline()
-                if first_line:
-                    obj = json.loads(first_line)
-                    print(f"\n{name}第一行:")
-                    print(f"  键: {list(obj.keys())}")
-                    print(f"  完整内容: {json.dumps(obj, ensure_ascii=False)[:200]}...")
+    print(f"\n验证集前3条:")
+    for i, seq in enumerate(valid_sequences[:3], 1):
+        hist_str = str(seq['inter_history'][:3])
+        if len(seq['inter_history']) > 3:
+            hist_str = hist_str[:-1] + ', ...]'
+        print(f"   {i}. user={seq['user_id'][:20]}..., target={seq['target_id']}, history_len={len(seq['inter_history'])}, history={hist_str}")
     
     # ============ 总结 ============
-    print("\n" + "=" * 70)
-    print("🎉 数据准备完成!")
-    print("=" * 70)
+    print(f"\n{'='*70}")
+    print(f"🎉 数据准备完成!")
+    print(f"{'='*70}")
     
     print(f"\n📁 生成的文件:")
     print(f"   1. {train_file}")
-    print(f"      - 序列数: {len(train_sequences)}")
+    print(f"      - 序列数: {len(train_sequences):,}")
     print(f"   2. {valid_file}")
-    print(f"      - 序列数: {len(valid_sequences)}")
+    print(f"      - 序列数: {len(valid_sequences):,}")
     print(f"   3. {test_file}")
-    print(f"      - 序列数: {len(test_sequences)}")
+    print(f"      - 序列数: {len(test_sequences):,}")
     
     print(f"\n📁 已有的文件:")
     print(f"   4. {MAP_FILE}")
     print(f"   5. {os.path.join(OUTPUT_DIR, f'{DATASET_NAME}_emb_256.npy')}")
     
-    print(f"\n✨ 下一步: 训练 ETEGRec!")
-    print(f"\n1. 创建配置文件 config/instruments.yaml")
-    print(f"2. 修改 run.sh 中的 DATASET=Instruments2023")
-    print(f"3. 运行: bash run.sh")
+    print(f"\n✨ 与作者数据集对齐:")
+    print(f"   ✅ 最大序列长度限制为 {MAX_SEQ_LENGTH}")
+    print(f"   ✅ 数据格式: {{user_id, target_id, inter_history}}")
+    print(f"   ✅ 映射包含 [PAD] token")
     
-    print("\n" + "=" * 70)
+    print(f"\n✨ 下一步: 训练 ETEGRec!")
+    print(f"   1. 创建配置文件 config/instruments.yaml")
+    print(f"   2. 修改 run.sh 中的 DATASET=Instruments2023")
+    print(f"   3. 运行: bash run.sh")
+    
+    print(f"\n{'='*70}")
 
 if __name__ == '__main__':
     main()

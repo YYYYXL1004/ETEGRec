@@ -12,9 +12,9 @@ def train_and_extract_embeddings():
     """
     训练 SASRec 并提取物品嵌入
     """
-    print("=" * 60)
-    print("🎵 SASRec 训练 - Musical Instruments 2023")
-    print("=" * 60)
+    print("=" * 70)
+    print("🎵 SASRec 训练 - Musical Instruments 2023 (优化版)")
+    print("=" * 70)
     
     # ============ 配置 ============
     config_dict = {
@@ -32,26 +32,26 @@ def train_and_extract_embeddings():
         
         # 数据划分策略
         'eval_args': {
-            'split': {'LS': 'valid_and_test'},  # Leave-one-out 策略
-            'order': 'TO',  # 按时间排序
+            'split': {'LS': 'valid_and_test'},
+            'order': 'TO',
             'group_by': 'user',
-            'mode': 'full'  # 全排序模式
+            'mode': 'full'
         },
         
-        # SASRec 模型参数
-        'hidden_size': 256,          # 嵌入维度 (与 ETEGRec 一致)
-        'inner_size': 256,           # FFN 隐藏层大小
-        'n_layers': 2,               # Transformer 层数
-        'n_heads': 2,                # 注意力头数
-        'hidden_dropout_prob': 0.5,  # Dropout 率
+        # 🔧 SASRec 模型参数（与作者对齐）
+        'hidden_size': 256,          # 嵌入维度
+        'inner_size': 256,
+        'n_layers': 2,
+        'n_heads': 2,
+        'hidden_dropout_prob': 0.5,
         'attn_dropout_prob': 0.5,
-        'hidden_act': 'gelu',        # 激活函数
+        'hidden_act': 'gelu',
         'layer_norm_eps': 1e-12,
         'initializer_range': 0.02,
-        'loss_type': 'CE',           # 损失函数：交叉熵
-        'max_seq_length': 50,        # 最大序列长度
+        'loss_type': 'CE',
+        'max_seq_length': 50,        # 🔧 限制为50（与作者一致）
         
-        # 🔧 修复：禁用负采样（CE损失不需要）
+        # 🔧 修复：禁用负采样
         'train_neg_sample_args': None,
         
         # 训练参数
@@ -85,9 +85,9 @@ def train_and_extract_embeddings():
         dataset = create_dataset(config)
         
         print(f"✅ 数据集加载成功!")
-        print(f"   用户数: {dataset.user_num}")
-        print(f"   物品数: {dataset.item_num}")
-        print(f"   交互数: {dataset.inter_num}")
+        print(f"   用户数: {dataset.user_num:,}")
+        print(f"   物品数: {dataset.item_num:,}")
+        print(f"   交互数: {dataset.inter_num:,}")
         
         train_data, valid_data, test_data = data_preparation(config, dataset)
         
@@ -103,6 +103,7 @@ def train_and_extract_embeddings():
         print(f"   Batch Size: {config['train_batch_size']}")
         print(f"   学习率: {config['learning_rate']}")
         print(f"   早停步数: {config['stopping_step']}")
+        print(f"   最大序列长度: {config['max_seq_length']}")
         
         trainer = Trainer(config, model)
         best_valid_score, best_valid_result = trainer.fit(
@@ -144,13 +145,15 @@ def train_and_extract_embeddings():
         print(f"   大小: {item_embedding_no_pad.nbytes / 1024 / 1024:.2f} MB")
         
         # 2. 生成 item2id 映射 (ETEGRec 格式)
-        # RecBole 的 token2id 映射
+        # 🔧 与作者格式一致：包含 [PAD] token
         item_token2id = dataset.field2token_id['item_id']
         
-        # 转换为 ETEGRec 需要的格式 (去掉 padding)
+        # 创建映射（包含 [PAD]）
         item2id_etegrec = {}
+        item2id_etegrec['[PAD]'] = 0  # 🔧 添加 PAD token
+        
         for token, idx in item_token2id.items():
-            if idx > 0:  # 跳过 padding (idx=0)
+            if idx > 0:  # 跳过 RecBole 的 padding (idx=0)
                 item2id_etegrec[str(token)] = int(idx)
         
         # 保存为 .emb_map.json
@@ -158,7 +161,8 @@ def train_and_extract_embeddings():
         with open(map_path, 'w') as f:
             json.dump(item2id_etegrec, f, indent=2)
         print(f"✅ Item2ID 映射已保存: {map_path}")
-        print(f"   物品数: {len(item2id_etegrec)}")
+        print(f"   映射条目数: {len(item2id_etegrec)} (包含 [PAD])")
+        print(f"   物品数: {len(item2id_etegrec) - 1} (不含 [PAD])")
         
         # ============ 验证 ============
         print("\n🔍 验证生成的文件...")
@@ -171,21 +175,29 @@ def train_and_extract_embeddings():
         with open(map_path, 'r') as f:
             loaded_map = json.load(f)
         
-        assert len(loaded_map) == loaded_emb.shape[0], \
-            f"映射数量 ({len(loaded_map)}) 与嵌入数量 ({loaded_emb.shape[0]}) 不匹配!"
+        # 🔧 映射数量应该是嵌入数量 + 1 ([PAD])
+        expected_map_size = loaded_emb.shape[0] + 1
+        assert len(loaded_map) == expected_map_size, \
+            f"映射数量 ({len(loaded_map)}) 应该是 {expected_map_size} (嵌入数 + PAD)!"
+        
+        assert '[PAD]' in loaded_map and loaded_map['[PAD]'] == 0, \
+            "映射应包含 [PAD] token，且索引为 0!"
         
         print("✅ 所有验证通过!")
+        print(f"   映射格式: {{'[PAD]': 0, ...}}")
+        print(f"   映射数量与嵌入匹配")
         
         # ============ 总结 ============
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 70)
         print("🎉 训练和提取完成!")
-        print("=" * 60)
+        print("=" * 70)
         print(f"\n📁 生成的文件:")
         print(f"   1. {npy_path}")
         print(f"      - 形状: {loaded_emb.shape}")
         print(f"      - 用途: ETEGRec 的 semantic_emb_path")
         print(f"\n   2. {map_path}")
-        print(f"      - 物品数: {len(loaded_map)}")
+        print(f"      - 条目数: {len(loaded_map)} (含 [PAD])")
+        print(f"      - 物品数: {len(loaded_map) - 1}")
         print(f"      - 用途: ETEGRec 的 map_path")
         
         print(f"\n📊 模型性能:")
@@ -193,7 +205,12 @@ def train_and_extract_embeddings():
         for metric, value in test_result.items():
             print(f"   测试集 {metric}: {value:.4f}")
         
-        print("\n" + "=" * 60)
+        print(f"\n✨ 与作者数据集对齐:")
+        print(f"   ✅ 最大序列长度: {config['max_seq_length']}")
+        print(f"   ✅ 映射包含 [PAD] token")
+        print(f"   ✅ 嵌入维度: 256")
+        
+        print("\n" + "=" * 70)
         
         return model, dataset, item_embedding_no_pad, test_result
         
@@ -208,7 +225,4 @@ if __name__ == '__main__':
     
     if model is not None:
         print("\n✨ 下一步: 准备 ETEGRec 的训练数据!")
-        print("   需要生成以下文件:")
-        print("   - Instruments2023.train.jsonl")
-        print("   - Instruments2023.valid.jsonl")
-        print("   - Instruments2023.test.jsonl")
+        print("   运行: python prepare_etegrec_data.py")
