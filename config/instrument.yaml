@@ -38,7 +38,7 @@ data_path: ./dataset
 lr_scheduler_type: cosine
 gradient_accumulation_steps: 1
 
-max_his_len: 50
+max_his_len: 20
 early_stop: 15
 
 metrics: recall@1,recall@5,ndcg@5,recall@10,ndcg@10

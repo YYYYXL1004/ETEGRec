@@ -7,7 +7,10 @@ dataset/*
 __pycache__/
 
 RQVAE/__pycache__
-RecRole/
+RecBole/dataset
+RecBole/log
+RecBole/log_tensorboard
+RecBole/saved
 docs/
 *.pth
 *.pyc
