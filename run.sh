@@ -1,4 +1,4 @@
-DATASET=instrument
+DATASET=Instruments2023
 
 
 accelerate launch --config_file accelerate_config_ddp.yaml main.py \
