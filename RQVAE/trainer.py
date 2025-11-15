@@ -31,6 +31,7 @@ class Trainer(object):
         self.best_save_heap = []
         self.newest_save_queue = []
         self.eval_step = min(args.eval_step, self.epochs)
+        self.patience = args.patience
         self.device = args.device
         self.device = torch.device(self.device)
         self.ckpt_dir = args.ckpt_dir
@@ -245,6 +246,13 @@ class Trainer(object):
 
                     if old_save not in self.best_save_heap:
                         delete_file(old_save[1])
+
+                # Early stopping
+                if cur_eval_step >= self.patience:
+                    self.logger.info(
+                        set_color(f"Early stopping triggered after {cur_eval_step} evaluations without improvement", "yellow")
+                    )
+                    break
 
 
 

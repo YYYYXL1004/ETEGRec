@@ -1,24 +1,89 @@
-from recbole.quick_start import run_recbole
+#!/usr/bin/env python3
+"""
+train_sasrec_unified.py
+
+更稳健的 SASRec 训练脚本（使用统一 split 标签），修复列名解析、评估设置问题，
+并在训练前做额外的检查以避免评估阶段返回 None 的情况。
+"""
+import os
+import json
+import numpy as np
+import pandas as pd
 from recbole.config import Config
 from recbole.data import create_dataset, data_preparation
 from recbole.model.sequential_recommender import SASRec
 from recbole.trainer import Trainer
-import torch
-import numpy as np
-import json
-import os
+
+def read_inter_file_normalized(inter_file):
+    """
+    读取 .inter 文件并规范化列名：
+    将 'user_id:token' -> 'user_id'，'split:token' -> 'split' 等。
+    返回 pandas.DataFrame
+    """
+    print(f"📖 读取交互文件: {inter_file}")
+    # 使用 header=0 读取，保留原始列名
+    df = pd.read_csv(inter_file, sep='\t', header=0, dtype=str, keep_default_na=False)
+    # 规范化列名（取 ':' 前面的部分）
+    new_cols = []
+    for c in df.columns.tolist():
+        if isinstance(c, str) and ':' in c:
+            new_cols.append(c.split(':')[0])
+        else:
+            new_cols.append(c)
+    df.columns = new_cols
+    # 把空字符串转为 NaN 以利于后续类型转换
+    df = df.replace({'': pd.NA})
+    return df
+
+def quick_checks_df(df):
+    # 必需列检查
+    for col in ['user_id', 'item_id', 'rating', 'timestamp', 'split']:
+        if col not in df.columns:
+            raise KeyError(f"缺少必需列: {col}。请确认 Instruments2023.inter 包含该列（可能名为 'split:token'）")
+    # 检查 split 取值
+    uniques = set(df['split'].dropna().unique())
+    if not {'train','valid','test'}.issubset({u.lower() for u in uniques}):
+        raise ValueError(f"split 列值应包含 'train','valid','test' 三类，目前发现: {sorted(list(uniques))}")
+    # 检查 timestamp/rating 类型可转为数值
+    df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+    df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
+    if df['timestamp'].isna().any():
+        raise ValueError("timestamp 列包含无法解析为数值的值，请检查 .inter 文件中的时间戳")
+    if df['rating'].isna().any():
+        # 允许缺失 rating（可默认为1.0），但提醒用户
+        print("⚠️ warning: rating 列包含无法解析为数值的值，会用 1.0 填充")
+        df['rating'] = df['rating'].fillna(1.0)
+    return df
+
+def save_split_files(df, output_dir):
+    """
+    保存三个分割文件（RecBole 可读），并返回每个文件路径
+    """
+    train_df = df[df['split'] == 'train'][['user_id','item_id','rating','timestamp']]
+    valid_df = df[df['split'] == 'valid'][['user_id','item_id','rating','timestamp']]
+    test_df  = df[df['split'] == 'test'][['user_id','item_id','rating','timestamp']]
+
+    # 写文件，header 需要带 recbole 的列类型标注
+    train_file = os.path.join(output_dir, 'Instruments2023_train.inter')
+    valid_file = os.path.join(output_dir, 'Instruments2023_valid.inter')
+    test_file  = os.path.join(output_dir, 'Instruments2023_test.inter')
+
+    train_df.to_csv(train_file, sep='\t', index=False,
+                    header=['user_id:token','item_id:token','rating:float','timestamp:float'])
+    valid_df.to_csv(valid_file, sep='\t', index=False,
+                    header=['user_id:token','item_id:token','rating:float','timestamp:float'])
+    test_df.to_csv(test_file, sep='\t', index=False,
+                    header=['user_id:token','item_id:token','rating:float','timestamp:float'])
+
+    print(f"✅ 已保存分割文件: {train_file}, {valid_file}, {test_file}")
+    return train_file, valid_file, test_file
 
 def train_and_extract_embeddings():
-    """
-    训练 SASRec 并提取物品嵌入
-    """
     print("=" * 70)
-    print("🎵 SASRec 训练 - Musical Instruments 2023 (优化版)")
+    print("🎵 SASRec 训练 - 使用统一数据划分（稳健版）")
     print("=" * 70)
-    
-    # ============ 配置 ============
+
     config_dict = {
-        # 数据集配置
         'model': 'SASRec',
         'dataset': 'Instruments2023',
         'data_path': './dataset/',
@@ -29,200 +94,122 @@ def train_and_extract_embeddings():
         'load_col': {
             'inter': ['user_id', 'item_id', 'rating', 'timestamp']
         },
-        
-        # 数据划分策略
+        # 使用 Leave-one-out split（LS），与我们按用户最后两个交互划分一致。
         'eval_args': {
             'split': {'LS': 'valid_and_test'},
             'order': 'TO',
             'group_by': 'user',
-            'mode': 'full'
+            'mode': 'full'   # 使用 full 模式（不依赖外部负采样表）
         },
-        
-        # 🔧 SASRec 模型参数（与作者对齐）
-        'hidden_size': 256,          # 嵌入维度
+        'hidden_size': 256,
         'inner_size': 256,
         'n_layers': 2,
         'n_heads': 2,
         'hidden_dropout_prob': 0.5,
         'attn_dropout_prob': 0.5,
         'hidden_act': 'gelu',
-        'layer_norm_eps': 1e-12,
-        'initializer_range': 0.02,
         'loss_type': 'CE',
-        'max_seq_length': 50,        # 🔧 限制为50（与作者一致）
-        
-        # 🔧 修复：禁用负采样
+        'max_seq_length': 50,
         'train_neg_sample_args': None,
-        
-        # 训练参数
-        'epochs': 300,
+        'epochs': 200,
         'train_batch_size': 2048,
         'eval_batch_size': 2048,
         'learner': 'adam',
         'learning_rate': 0.001,
-        
-        # 评估参数
         'eval_step': 1,
         'stopping_step': 10,
         'metrics': ['Recall', 'NDCG', 'Hit', 'MRR'],
         'topk': [5, 10, 20],
         'valid_metric': 'NDCG@10',
-        'metric_decimal_place': 4,
-        
-        # GPU 配置
-        'gpu_id': '3',
+        'gpu_id': '0',
         'use_gpu': True,
-        
-        # 保存配置
-        'checkpoint_dir': './saved/SASRec',
+        'checkpoint_dir': './saved/SASRec_unified',
         'show_progress': True,
     }
-    
+
     try:
-        # ============ 加载数据 ============
-        print("\n🔧 正在加载数据集...")
-        config = Config(model='SASRec', dataset='Instruments2023', config_dict=config_dict)
-        dataset = create_dataset(config)
-        
-        print(f"✅ 数据集加载成功!")
-        print(f"   用户数: {dataset.user_num:,}")
-        print(f"   物品数: {dataset.item_num:,}")
-        print(f"   交互数: {dataset.inter_num:,}")
-        
-        train_data, valid_data, test_data = data_preparation(config, dataset)
-        
-        # ============ 创建模型 ============
-        print("\n🤖 正在创建 SASRec 模型...")
-        model = SASRec(config, train_data.dataset).to(config['device'])
-        print(f"   设备: {config['device']}")
-        print(f"   模型参数量: {sum(p.numel() for p in model.parameters()):,}")
-        
-        # ============ 训练 ============
-        print("\n🚀 开始训练...")
-        print(f"   总轮数: {config['epochs']}")
-        print(f"   Batch Size: {config['train_batch_size']}")
-        print(f"   学习率: {config['learning_rate']}")
-        print(f"   早停步数: {config['stopping_step']}")
-        print(f"   最大序列长度: {config['max_seq_length']}")
-        
-        trainer = Trainer(config, model)
-        best_valid_score, best_valid_result = trainer.fit(
-            train_data, valid_data,
-            saved=True,
-            show_progress=config['show_progress']
-        )
-        
-        print(f"\n✅ 训练完成!")
-        print(f"   最佳验证 {config['valid_metric']}: {best_valid_score:.4f}")
-        
-        # ============ 测试 ============
-        print("\n📊 在测试集上评估...")
-        test_result = trainer.evaluate(test_data, load_best_model=True, show_progress=True)
-        print(f"   测试结果:")
-        for metric, value in test_result.items():
-            print(f"      {metric}: {value:.4f}")
-        
-        # ============ 提取嵌入 ============
-        print("\n💾 正在提取物品嵌入...")
-        
-        # 获取训练好的 item embedding
-        item_embedding = model.item_embedding.weight.data.cpu().numpy()
-        print(f"   原始嵌入形状: {item_embedding.shape}")
-        
-        # 去掉 padding token (索引 0)
-        item_embedding_no_pad = item_embedding[1:]
-        print(f"   去除 padding 后: {item_embedding_no_pad.shape}")
-        
-        # ============ 保存文件 ============
+        inter_file = './dataset/Instruments2023/Instruments2023.inter'
+        if not os.path.exists(inter_file):
+            raise FileNotFoundError(f"{inter_file} 不存在，请先运行 prepare_amazon_data_unified.py")
+
+        # 读取并规范化列名
+        df = read_inter_file_normalized(inter_file)
+
+        # quick checks: ensure columns and types are OK
+        df = quick_checks_df(df)
+
+        # 把 split 列值标准化小写并去除空白
+        df['split'] = df['split'].astype(str).str.strip().str.lower()
+
+        # 打印分布（便于调试）
+        print(f"split 值分布:\n{df['split'].value_counts()}")
+
+        # 保存为 RecBole 可读的分割文件（RecBole 会基于 dataset name 去读取）
         output_dir = './dataset/Instruments2023'
         os.makedirs(output_dir, exist_ok=True)
-        
-        # 1. 保存 .npy 嵌入文件
+        train_file, valid_file, test_file = save_split_files(df, output_dir)
+
+        # 使用 RecBole 的配置加载数据
+        # RecBole 会在 dataset/Instruments2023/ 下查找数据文件
+        config = Config(model='SASRec', dataset='Instruments2023', config_dict=config_dict)
+        dataset = create_dataset(config)
+        train_data, valid_data, test_data = data_preparation(config, dataset)
+
+        # quick runtime checks: ensure dataloaders non-empty
+        if len(train_data) == 0:
+            raise RuntimeError("训练 DataLoader 为空！检查 Instruments2023_train.inter 是否正确")
+        if len(valid_data) == 0:
+            raise RuntimeError("验证 DataLoader 为空！检查 Instruments2023_valid.inter 是否正确")
+        if len(test_data) == 0:
+            raise RuntimeError("测试 DataLoader 为空！检查 Instruments2023_test.inter 是否正确")
+
+        # 创建并训练模型
+        model = SASRec(config, train_data.dataset).to(config['device'])
+        trainer = Trainer(config, model)
+        best_valid_score, best_valid_result = trainer.fit(train_data, valid_data, saved=True, show_progress=config['show_progress'])
+
+        print(f"\n✅ 训练完成! 最佳验证 NDCG@10: {best_valid_score:.4f}")
+
+        # 评估
+        test_result = trainer.evaluate(test_data, load_best_model=True, show_progress=True)
+        print("\n📊 测试结果:")
+        for metric, value in test_result.items():
+            print(f"   {metric}: {value:.4f}")
+
+        # 提取并保存嵌入
+        print("\n💾 正在提取物品嵌入...")
+        item_embedding = model.item_embedding.weight.data.cpu().numpy()
+        item_embedding_no_pad = item_embedding[1:]
         npy_path = os.path.join(output_dir, 'Instruments2023_emb_256.npy')
         np.save(npy_path, item_embedding_no_pad)
-        print(f"\n✅ 嵌入文件已保存: {npy_path}")
-        print(f"   形状: {item_embedding_no_pad.shape}")
-        print(f"   大小: {item_embedding_no_pad.nbytes / 1024 / 1024:.2f} MB")
-        
-        # 2. 生成 item2id 映射 (ETEGRec 格式)
-        # 🔧 与作者格式一致：包含 [PAD] token
+        print(f"✅ 嵌入文件已保存: {npy_path} (shape={item_embedding_no_pad.shape})")
+
+        # 保存映射（包含 [PAD]）
         item_token2id = dataset.field2token_id['item_id']
-        
-        # 创建映射（包含 [PAD]）
-        item2id_etegrec = {}
-        item2id_etegrec['[PAD]'] = 0  # 🔧 添加 PAD token
-        
+        item2id_etegrec = {'[PAD]': 0}
         for token, idx in item_token2id.items():
-            if idx > 0:  # 跳过 RecBole 的 padding (idx=0)
+            if idx > 0:
                 item2id_etegrec[str(token)] = int(idx)
-        
-        # 保存为 .emb_map.json
         map_path = os.path.join(output_dir, 'Instruments2023.emb_map.json')
-        with open(map_path, 'w') as f:
-            json.dump(item2id_etegrec, f, indent=2)
-        print(f"✅ Item2ID 映射已保存: {map_path}")
-        print(f"   映射条目数: {len(item2id_etegrec)} (包含 [PAD])")
-        print(f"   物品数: {len(item2id_etegrec) - 1} (不含 [PAD])")
-        
-        # ============ 验证 ============
-        print("\n🔍 验证生成的文件...")
-        
-        # 验证嵌入文件
+        with open(map_path, 'w', encoding='utf-8') as f:
+            json.dump(item2id_etegrec, f, indent=2, ensure_ascii=False)
+        print(f"✅ Item2ID 映射已保存: {map_path} (含 [PAD])")
+
+        # Validate mapping size vs embeddings
         loaded_emb = np.load(npy_path)
-        assert loaded_emb.shape == item_embedding_no_pad.shape, "嵌入形状不匹配!"
-        
-        # 验证映射文件
-        with open(map_path, 'r') as f:
+        with open(map_path, 'r', encoding='utf-8') as f:
             loaded_map = json.load(f)
-        
-        # 🔧 映射数量应该是嵌入数量 + 1 ([PAD])
         expected_map_size = loaded_emb.shape[0] + 1
-        assert len(loaded_map) == expected_map_size, \
-            f"映射数量 ({len(loaded_map)}) 应该是 {expected_map_size} (嵌入数 + PAD)!"
-        
-        assert '[PAD]' in loaded_map and loaded_map['[PAD]'] == 0, \
-            "映射应包含 [PAD] token，且索引为 0!"
-        
-        print("✅ 所有验证通过!")
-        print(f"   映射格式: {{'[PAD]': 0, ...}}")
-        print(f"   映射数量与嵌入匹配")
-        
-        # ============ 总结 ============
-        print("\n" + "=" * 70)
-        print("🎉 训练和提取完成!")
-        print("=" * 70)
-        print(f"\n📁 生成的文件:")
-        print(f"   1. {npy_path}")
-        print(f"      - 形状: {loaded_emb.shape}")
-        print(f"      - 用途: ETEGRec 的 semantic_emb_path")
-        print(f"\n   2. {map_path}")
-        print(f"      - 条目数: {len(loaded_map)} (含 [PAD])")
-        print(f"      - 物品数: {len(loaded_map) - 1}")
-        print(f"      - 用途: ETEGRec 的 map_path")
-        
-        print(f"\n📊 模型性能:")
-        print(f"   验证集 {config['valid_metric']}: {best_valid_score:.4f}")
-        for metric, value in test_result.items():
-            print(f"   测试集 {metric}: {value:.4f}")
-        
-        print(f"\n✨ 与作者数据集对齐:")
-        print(f"   ✅ 最大序列长度: {config['max_seq_length']}")
-        print(f"   ✅ 映射包含 [PAD] token")
-        print(f"   ✅ 嵌入维度: 256")
-        
-        print("\n" + "=" * 70)
-        
+        if len(loaded_map) != expected_map_size:
+            raise AssertionError(f"映射数量 ({len(loaded_map)}) != 嵌入数量+1 ({expected_map_size})")
+
+        print("✅ 映射数量与嵌入数量一致 (含 [PAD])")
         return model, dataset, item_embedding_no_pad, test_result
-        
+
     except Exception as e:
         print(f"\n❌ 错误: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         return None, None, None, None
 
 if __name__ == '__main__':
-    model, dataset, embeddings, test_result = train_and_extract_embeddings()
-    
-    if model is not None:
-        print("\n✨ 下一步: 准备 ETEGRec 的训练数据!")
-        print("   运行: python prepare_etegrec_data.py")
+    train_and_extract_embeddings()

@@ -21,6 +21,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=1024, help='batch size')
     parser.add_argument('--num_workers', type=int, default=2, )
     parser.add_argument('--eval_step', type=int, default=50, help='eval step')
+    parser.add_argument('--patience', type=int, default=10, help='early stopping patience')
     parser.add_argument('--learner', type=str, default="AdamW", help='optimizer')
     parser.add_argument("--weight_decay", type=float, default=1e-4, help='l2 regularization weight')
     parser.add_argument('--lr_scheduler_type', type=str, default="linear", help='scheduler')

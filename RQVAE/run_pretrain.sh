@@ -1,7 +1,7 @@
 
-DATASET=scientific
+DATASET=Instruments2023
 
-DEVICE="cuda:7"
+DEVICE="cuda:3"
 
 
 python -u main.py \
@@ -21,6 +21,6 @@ python -u main.py \
   --dist l2 \
   --device $DEVICE \
   --kmeans_init True\
-  --data_path ../dataset/${DATASET}/${DATASET}_emb_256.npy \
+  --data_path ../RecBole/dataset/${DATASET}/${DATASET}_emb_256.npy \
   --ckpt_dir ./rqvae_ckpt/${DATASET}
 
