@@ -1,7 +1,7 @@
 
 DATASET=Instruments2023
 
-DEVICE="cuda:3"
+DEVICE="cuda:0"
 
 
 python -u main.py \
