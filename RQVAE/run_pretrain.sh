@@ -1,5 +1,5 @@
 
-DATASET=Instrument2014
+DATASET=Instrument2018
 
 DEVICE="cuda:0"
 
