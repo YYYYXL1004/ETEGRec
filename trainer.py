@@ -598,12 +598,15 @@ class Trainer(object):
         self.rec_optimizer, self.rec_lr_scheduler = self.accelerator.prepare(self.rec_optimizer, self.rec_lr_scheduler)
         
         loss_w['code_loss'], loss_w['vq_loss'], loss_w['kl_loss'], loss_w['dec_cl_loss'] = 1, 0, 0, 0
-        if dist.is_initialized():
-            safe_load(self.model_rec.module, self.best_ckpt, verbose=verbose)
-            safe_load(self.model_id.module, f'{self.best_ckpt}.rqvae', verbose=verbose)
+        if self.best_ckpt:
+            if dist.is_initialized():
+                safe_load(self.model_rec.module, self.best_ckpt, verbose=verbose)
+                safe_load(self.model_id.module, f'{self.best_ckpt}.rqvae', verbose=verbose)
+            else:
+                safe_load(self.model_rec, self.best_ckpt, verbose=verbose)
+                safe_load(self.model_id, f'{self.best_ckpt}.rqvae', verbose=verbose)
         else:
-            safe_load(self.model_rec, self.best_ckpt, verbose=verbose)
-            safe_load(self.model_id, f'{self.best_ckpt}.rqvae', verbose=verbose)
+            self.log('No best checkpoint found; skip loading and use current model', level='warning')
         all_item_code = self.get_code(epoch_idx=0, verbose=False)
         self.all_item_code = torch.tensor(all_item_code).to(self.device)
 
@@ -674,19 +677,24 @@ class Trainer(object):
 
         if load_best_model:
             ckpt_file = model_file or self.best_ckpt
-            if dist.is_initialized():
-                safe_load(self.model_rec.module, ckpt_file, verbose=verbose)
-                safe_load(self.model_id.module, ckpt_file+'.rqvae', verbose=verbose)
+            if ckpt_file:
+                if dist.is_initialized():
+                    safe_load(self.model_rec.module, ckpt_file, verbose=verbose)
+                    safe_load(self.model_id.module, ckpt_file+'.rqvae', verbose=verbose)
+                else:
+                    safe_load(self.model_rec, ckpt_file, verbose=verbose)
+                    safe_load(self.model_id, ckpt_file+'.rqvae', verbose=verbose)
+
+                code = json.load(open(ckpt_file[:-3]+'.code.json'))
+
+                message_output = "Loading model parameters from {}".format(
+                    ckpt_file
+                )
+                self.log(message_output)
             else:
-                safe_load(self.model_rec, ckpt_file, verbose=verbose)
-                safe_load(self.model_id, ckpt_file+'.rqvae', verbose=verbose)
-
-            code = json.load(open(ckpt_file[:-3]+'.code.json'))
-
-            message_output = "Loading model parameters from {}".format(
-                ckpt_file
-            )
-            self.log(message_output)
+                if code is None:
+                    code = self.all_item_code if self.all_item_code is not None else self.get_code(epoch_idx=-1, verbose=False)
+                self.log("No checkpoint available; evaluating current in-memory model", level='warning')
 
         self.model_rec.eval()
         self.model_id.eval()
