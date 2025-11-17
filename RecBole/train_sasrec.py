@@ -217,13 +217,13 @@ def extract_embeddings(model, dataset, output_dir, dataset_name):
 
 def main():
     print("=" * 70)
-    print("🎵 SASRec训练 - Amazon Musical Instruments 2023")
+    print("🎵 SASRec训练 - Amazon Musical Instruments")
     print("=" * 70)
     
     # 配置
-    BASE_DIR = './dataset/Instrument2014'
-    INTER_FILE = os.path.join(BASE_DIR, 'Instrument2014.inter')
-    DATASET_NAME = 'Instrument2014'
+    BASE_DIR = './dataset/Instrument2018'
+    INTER_FILE = os.path.join(BASE_DIR, 'Instrument2018.inter')
+    DATASET_NAME = 'Instrument2018'
     
     if not os.path.exists(INTER_FILE):
         print(f"❌ 文件不存在: {INTER_FILE}")
@@ -234,12 +234,12 @@ def main():
     df_train, df_valid, df_test = load_and_split_data(INTER_FILE)
     
     # 步骤2: 保存合并的.inter文件 (供RecBole使用)
-    recbole_dir = './dataset/Instrument2014_recbole'
-    recbole_dataset_name = 'Instrument2014_recbole'
+    recbole_dir = './dataset/Instrument2018/Instrument2018_recbole'
+    recbole_dataset_name = 'Instrument2018_recbole'
     save_recbole_inter_file(df_train, df_valid, df_test, recbole_dir, recbole_dataset_name)
     
     # 步骤3: 训练SASRec (使用valid做早停，test做最终评估)
-    model, dataset, test_result = train_sasrec(recbole_dataset_name, './dataset/')
+    model, dataset, test_result = train_sasrec(recbole_dataset_name, './dataset/Instrument2018/')
     
     # 步骤4: 提取并保存嵌入 (保存到原始数据目录)
     npy_path, map_path = extract_embeddings(model, dataset, BASE_DIR, DATASET_NAME)
