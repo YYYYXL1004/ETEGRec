@@ -73,6 +73,10 @@ def train(config, verbose=True, rank=0):
     semantic_emb = np.load(semantic_emb_path)
         
     model_rec.semantic_embedding.weight.data[1:] = torch.tensor(semantic_emb).to(config['device'])
+    text_emb_path = os.path.join(dataset_path, config["text_emb_path"])
+    text_semantic_emb = np.load(text_emb_path)
+    text_semantic_emb_tensor = torch.tensor(text_semantic_emb).to(config['device'])
+
     model_id = RQVAE(config=config, in_dim=model_rec.semantic_hidden_size)
     
     log(model_rec, accelerator, logger)
@@ -97,7 +101,8 @@ def train(config, verbose=True, rank=0):
     
     
     trainer = Trainer(config=config, model_rec=model_rec, model_id=model_id, accelerator=accelerator, train_data=train_data_loader,
-                      valid_data=valid_data_loader, test_data=test_data_loader, eos_token_id=eos_token_id)
+                      valid_data=valid_data_loader, test_data=test_data_loader, eos_token_id=eos_token_id,
+                      text_semantic_emb_tensor=text_semantic_emb_tensor)
     
     best_score_pre = trainer.train(verbose=verbose)
     test_results_pre = trainer.test()
