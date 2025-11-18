@@ -59,7 +59,7 @@ num_beams: 20
 
 alpha: 1
 warm_epoch: 10
-rqvae_path: ./RQVAE/rqvae_ckpt/Instrument2018/Nov-17-2025_12-55-26/best_collision_model.pth
+rqvae_path: ./RQVAE/rqvae_ckpt/Instrument2018/Nov-18-2025_10-23-09/best_collision_model.pth
 
 #rqvae
 num_emb_list: [256,256,256]
