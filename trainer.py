@@ -18,12 +18,13 @@ from metrics import *
 from utils import *
 from collections import defaultdict
 from logging import getLogger
+from layers import MLPLayers
 init(autoreset=True)
     
     
 class Trainer(object):
     def __init__(self, config, model_rec: Model, model_id, accelerator, train_data=None,
-                 valid_data=None, test_data=None, eos_token_id=None):
+                 valid_data=None, test_data=None, eos_token_id=None, text_semantic_emb_tensor=None):
         self.config = config
         self.model_rec = model_rec
         self.model_id = model_id
@@ -58,6 +59,7 @@ class Trainer(object):
         self.state = PartialState()
         self.world_size = self.state.num_processes
         self.device = self.state.device
+        self.text_semantic_emb_tensor = text_semantic_emb_tensor
         self.all_item_code = None
         self.model_rec.device = self.device
         
@@ -108,13 +110,19 @@ class Trainer(object):
 
         self.best_score = 0
         self.best_ckpt = None
-        
+        # 定义一个可训练的投影层，用于将 768 维的 LLM 嵌入投影到 256 维的协作空间
+        self.text_adapter = MLPLayers(layers=[config['text_hidden_size'], config['semantic_hidden_size']],
+                                activation="none", # 线性投影
+                                bn=False)
+
         self.model_rec, self.rec_optimizer, self.rec_lr_scheduler, \
         self.model_id, self.id_optimizer, self.id_lr_scheduler, \
-        self.train_data, self.valid_data, self.test_data = \
+        self.train_data, self.valid_data, self.test_data, \
+        self.text_adapter = \
         self.accelerator.prepare(self.model_rec, self.rec_optimizer, self.rec_lr_scheduler,
                                  self.model_id, self.id_optimizer, self.id_lr_scheduler,
-                                 self.train_data, self.valid_data, self.test_data)
+                                 self.train_data, self.valid_data, self.test_data,
+                                 self.text_adapter)
 
     def _build_optimizer(self, model, lr, weight_decay):
         params = model.parameters()
@@ -247,8 +255,10 @@ class Trainer(object):
                 target_recon_embs, _, _, _, target_code_logits = \
                 self.model_id(target_semantic_embs)
 
-                _, unq_index = np.unique(target_flatten.cpu().numpy(), return_index=True)
-                unq_index = torch.tensor(unq_index).to(self.device)
+                # 新代码：我们需要 unq_input 来查表获取文本嵌入
+                unq_input_np, unq_index_np = np.unique(target_flatten.cpu().numpy(), return_index=True)
+                unq_input = torch.tensor(unq_input_np).to(self.device) # Item IDs
+                unq_index = torch.tensor(unq_index_np).to(self.device)
 
                 outputs = self.model_rec(input_ids=input_ids,
                                          attention_mask=attention_mask,
@@ -273,14 +283,34 @@ class Trainer(object):
                           self.compute_discrete_contrastive_loss_kl(target_code_logits[unq_index],
                                                                     seq_code_logits[unq_index])
             
-                
-                dec_cl_loss = self.compute_contrastive_loss(target_recon_embs[unq_index], dec_latents[unq_index], sim=self.sim, gathered=False) + \
-                          self.compute_contrastive_loss(dec_latents[unq_index], target_recon_embs[unq_index], sim=self.sim, gathered=False)
+                # --- 计算三方对齐损失 ---
+                # 准备向量
+                # h^D (用户偏好)
+                pref_emb = dec_latents[unq_index] 
+                # z_tilde (重构语义)
+                recon_emb = target_recon_embs[unq_index]
+                # z_text (LLM 文本真值，需投影)
+                text_emb_raw = self.text_semantic_emb_tensor[unq_input]
+                text_emb = self.text_adapter(text_emb_raw) # 投影到 256 维
 
+                # 1. 原始对齐 (h^D <-> z_tilde)
+                dec_cl_loss_orig = self.compute_contrastive_loss(recon_emb, pref_emb, sim=self.sim, gathered=False) + \
+                                   self.compute_contrastive_loss(pref_emb, recon_emb, sim=self.sim, gathered=False)
+                
+                # 2. 推荐器与LLM对齐 (h^D <-> z_text) [核心改进]
+                dec_cl_loss_rec_llm = self.compute_contrastive_loss(pref_emb, text_emb, sim=self.sim, gathered=False) + \
+                                      self.compute_contrastive_loss(text_emb, pref_emb, sim=self.sim, gathered=False)
+
+                # 3. Tokenizer与LLM对齐 (z_tilde <-> z_text) [核心改进]
+                dec_cl_loss_tok_llm = self.compute_contrastive_loss(recon_emb, text_emb, sim=self.sim, gathered=False) + \
+                                      self.compute_contrastive_loss(text_emb, recon_emb, sim=self.sim, gathered=False)
+                
                 losses = dict(
                     code_loss=code_loss,
                     kl_loss=kl_loss,
-                    dec_cl_loss=dec_cl_loss,
+                    dec_cl_loss_orig=dec_cl_loss_orig,
+                    dec_cl_loss_rec_llm=dec_cl_loss_rec_llm,
+                    dec_cl_loss_tok_llm=dec_cl_loss_tok_llm,
                 )
                 
                 loss = sum([v * loss_w[k] for k, v in losses.items()])
@@ -294,14 +324,17 @@ class Trainer(object):
                 
                 kl_loss_mean = self.accelerator.gather(kl_loss).mean().item()
                 code_loss_mean = self.accelerator.gather(code_loss).mean().item()
-                dec_cl_loss_mean = self.accelerator.gather(dec_cl_loss).mean().item()
-                
+                dec_cl_orig_mean = self.accelerator.gather(dec_cl_loss_orig).mean().item()
+                dec_cl_rec_llm_mean = self.accelerator.gather(dec_cl_loss_rec_llm).mean().item()
+                dec_cl_tok_llm_mean = self.accelerator.gather(dec_cl_loss_tok_llm).mean().item()
                 loss_mean = self.accelerator.gather(loss).mean().item()
                 loss = dict(
                     loss=loss_mean,
                     kl_loss=kl_loss_mean,
                     code_loss=code_loss_mean,
-                    dec_cl_loss=dec_cl_loss_mean,
+                    dec_cl_loss_orig=dec_cl_orig_mean,
+                    dec_cl_loss_rec_llm=dec_cl_rec_llm_mean,
+                    dec_cl_loss_tok_llm=dec_cl_tok_llm_mean,
                 )
 
                 for k,v in loss.items():
@@ -400,16 +433,34 @@ class Trainer(object):
                                                                     seq_code_logits[unq_index])
                 
                 
-                dec_cl_loss = self.compute_contrastive_loss(target_recon_embs[unq_index], dec_latents[unq_index],
-                                                            sim=self.sim, gathered=False) + \
-                              self.compute_contrastive_loss(dec_latents[unq_index], target_recon_embs[unq_index],
-                                                            sim=self.sim, gathered=False)
+                # --- [修改开始] 计算三方对齐损失 ---
+                # 准备向量
+                pref_emb = dec_latents[unq_index]
+                recon_emb = target_recon_embs[unq_index]
+                
+                # 获取并投影 LLM 语义
+                text_emb_raw = self.text_semantic_emb_tensor[unq_input]
+                text_emb = self.text_adapter(text_emb_raw)
+
+                # 1. 原始对齐
+                dec_cl_loss_orig = self.compute_contrastive_loss(recon_emb, pref_emb, sim=self.sim, gathered=False) + \
+                                   self.compute_contrastive_loss(pref_emb, recon_emb, sim=self.sim, gathered=False)
+                
+                # 2. 推荐器与LLM对齐
+                dec_cl_loss_rec_llm = self.compute_contrastive_loss(pref_emb, text_emb, sim=self.sim, gathered=False) + \
+                                      self.compute_contrastive_loss(text_emb, pref_emb, sim=self.sim, gathered=False)
+                
+                # 3. Tokenizer与LLM对齐
+                dec_cl_loss_tok_llm = self.compute_contrastive_loss(recon_emb, text_emb, sim=self.sim, gathered=False) + \
+                                      self.compute_contrastive_loss(text_emb, recon_emb, sim=self.sim, gathered=False)
                 
                 losses = dict(
                     vq_loss=vq_loss,
                     code_loss=code_loss,
                     kl_loss=kl_loss,
-                    dec_cl_loss=dec_cl_loss,
+                    dec_cl_loss_orig=dec_cl_loss_orig,
+                    dec_cl_loss_rec_llm=dec_cl_loss_rec_llm,
+                    dec_cl_loss_tok_llm=dec_cl_loss_tok_llm,
                 )
                 
                 loss = sum([v * loss_w[k] for k, v in losses.items()])
@@ -424,7 +475,9 @@ class Trainer(object):
                 vq_loss_mean = self.accelerator.gather(vq_loss).mean().item()
                 code_loss_mean = self.accelerator.gather(code_loss).mean().item()
                 kl_loss_mean = self.accelerator.gather(kl_loss).mean().item()
-                dec_cl_loss_mean = self.accelerator.gather(dec_cl_loss).mean().item()
+                dec_cl_orig_mean = self.accelerator.gather(dec_cl_loss_orig).mean().item()
+                dec_cl_rec_llm_mean = self.accelerator.gather(dec_cl_loss_rec_llm).mean().item()
+                dec_cl_tok_llm_mean = self.accelerator.gather(dec_cl_loss_tok_llm).mean().item()
                 
                 loss_mean = self.accelerator.gather(loss).mean().item()
                 loss = dict(
@@ -432,7 +485,9 @@ class Trainer(object):
                     vq_loss=vq_loss_mean,
                     code_loss=code_loss_mean,
                     kl_loss=kl_loss_mean,
-                    dec_cl_loss=dec_cl_loss_mean,
+                    dec_cl_loss_orig=dec_cl_orig_mean,
+                    dec_cl_loss_rec_llm=dec_cl_rec_llm_mean,
+                    dec_cl_loss_tok_llm=dec_cl_tok_llm_mean,
                 )
 
                 for k,v in loss.items():
@@ -516,7 +571,12 @@ class Trainer(object):
                 loss_w['vq_loss'] = self.config['id_vq_loss']
                 loss_w['code_loss'] = self.config['id_code_loss'] if epoch_idx >= self.warm_epoch else 0
                 loss_w['kl_loss'] = self.config['id_kl_loss'] if epoch_idx >= self.warm_epoch else 0
-                loss_w['dec_cl_loss'] = self.config['id_dec_cl_loss'] if epoch_idx >= self.warm_epoch else 0
+                # loss_w['dec_cl_loss'] = self.config['id_dec_cl_loss'] if epoch_idx >= self.warm_epoch else 0
+                # 拆分为三个子损失权重 
+                # 注意：请确保你的 yaml 配置文件里已经添加了这些新参数，否则这里会报错
+                loss_w['dec_cl_loss_orig'] = self.config.get('id_dec_cl_loss_orig', 0.0001) if epoch_idx >= self.warm_epoch else 0
+                loss_w['dec_cl_loss_rec_llm'] = self.config.get('id_dec_cl_loss_rec_llm', 0.0001) if epoch_idx >= self.warm_epoch else 0
+                loss_w['dec_cl_loss_tok_llm'] = self.config.get('id_dec_cl_loss_tok_llm', 0.0001) if epoch_idx >= self.warm_epoch else 0   
 
                 for name, param in self.model_rec.named_parameters():
                     param.requires_grad = False
@@ -526,7 +586,10 @@ class Trainer(object):
                 loss_w['vq_loss'] = self.config['rec_vq_loss']
                 loss_w['code_loss'] = self.config['rec_code_loss']
                 loss_w['kl_loss'] = self.config['rec_kl_loss'] if epoch_idx >= self.warm_epoch else 0
-                loss_w['dec_cl_loss'] = self.config['rec_dec_cl_loss'] if epoch_idx >= self.warm_epoch else 0
+                # loss_w['dec_cl_loss'] = self.config['rec_dec_cl_loss'] if epoch_idx >= self.warm_epoch else 0
+                loss_w['dec_cl_loss_orig'] = self.config.get('rec_dec_cl_loss_orig', 0.0001) if epoch_idx >= self.warm_epoch else 0
+                loss_w['dec_cl_loss_rec_llm'] = self.config.get('rec_dec_cl_loss_rec_llm', 0.0001) if epoch_idx >= self.warm_epoch else 0
+                loss_w['dec_cl_loss_tok_llm'] = self.config.get('rec_dec_cl_loss_tok_llm', 0.0001) if epoch_idx >= self.warm_epoch else 0
 
                 for name, param in self.model_rec.named_parameters():
                     semantic_emb_name = 'module.semantic_embedding' if dist.is_initialized() else 'semantic_embedding'
