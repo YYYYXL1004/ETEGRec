@@ -1,11 +1,13 @@
 dataset: instrument
-seed: 42
+seed: 2020
 reproducibility: True
 log_dir: ./logs
 
 map_path: .emb_map.json
 semantic_emb_path: instrument_emb_256.npy
 semantic_hidden_size: 256
+text_emb_path: instrument_text_768.npy  
+text_hidden_size: 768
 code_num: 256
 code_length: 4
 
@@ -18,12 +20,18 @@ weight_decay: 0.05
 id_vq_loss: 1
 id_code_loss: 0
 id_kl_loss: 0.0001
-id_dec_cl_loss: 0.0003
+# id_dec_cl_loss: 0.0003  
+id_dec_cl_loss_orig: 0.0001     # h^D <-> z_tilde (原始)
+id_dec_cl_loss_rec_llm: 0.0001    # h^D <-> z_text (新增)
+id_dec_cl_loss_tok_llm: 0.0001    # z_tilde <-> z_text (新增)
 
 rec_vq_loss: 0
 rec_code_loss: 1
 rec_kl_loss: 0.0001
-rec_dec_cl_loss: 0.0003
+# rec_dec_cl_loss: 0.0003 
+rec_dec_cl_loss_orig: 0.0001
+rec_dec_cl_loss_rec_llm: 0.0001
+rec_dec_cl_loss_tok_llm: 0.0001
 
 cycle: 2
 sim: cos
@@ -59,7 +67,7 @@ num_beams: 20
 
 alpha: 1
 warm_epoch: 10
-rqvae_path: ./RQVAE/rqvae_ckpt/instrument/Nov-16-2025_13-45-06/best_collision_model.pth
+rqvae_path: ./dataset/instrument/256-512-256-128.rqvae.pth
 
 #rqvae
 num_emb_list: [256,256,256]
