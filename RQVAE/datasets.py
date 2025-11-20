@@ -19,3 +19,29 @@ class EmbDataset(data.Dataset):
 
     def __len__(self):
         return len(self.embeddings)
+
+
+class DualEmbDataset(data.Dataset):
+
+    def __init__(self, collab_path, semantic_path):
+        self.collab_embeddings = np.load(collab_path)
+        self.semantic_embeddings = np.load(semantic_path)
+        
+        # Handle PAD token mismatch
+        # User hint: "第一个是[PAD]" and Semantic has 1 more item than Collab
+        if len(self.semantic_embeddings) == len(self.collab_embeddings) + 1:
+            print(f"Detected PAD token in Semantic embeddings. Slicing [1:] to align with Collab.")
+            self.semantic_embeddings = self.semantic_embeddings[1:]
+            
+        assert len(self.collab_embeddings) == len(self.semantic_embeddings), \
+            f"Length mismatch: Collab {len(self.collab_embeddings)} vs Semantic {len(self.semantic_embeddings)}"
+        self.dim = self.collab_embeddings.shape[-1] + self.semantic_embeddings.shape[-1]
+
+    def __getitem__(self, index):
+        collab_emb = self.collab_embeddings[index]
+        semantic_emb = self.semantic_embeddings[index]
+        combined_emb = np.concatenate((collab_emb, semantic_emb), axis=0)
+        return torch.FloatTensor(combined_emb)
+
+    def __len__(self):
+        return len(self.collab_embeddings)

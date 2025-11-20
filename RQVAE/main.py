@@ -8,7 +8,7 @@ import logging
 os.environ["TORCH_USE_CUDA_DSA"]="1"
 from torch.utils.data import DataLoader
 
-from datasets import EmbDataset
+from datasets import EmbDataset, DualEmbDataset
 from vq import RQVAE
 from trainer import  Trainer
 
@@ -29,6 +29,8 @@ def parse_args():
     parser.add_argument("--data_path", type=str,
                         default="/media/zhengbowen/data/Amazon2018/Processed/Instruments/Instruments.emb-llama2-td.npy",
                         help="Input data path.")
+    parser.add_argument("--collab_path", type=str, default=None, help="Collaborative embeddings path.")
+    parser.add_argument("--semantic_path", type=str, default=None, help="Semantic embeddings path.")
     parser.add_argument("--device", type=str, default="cuda:1", help="gpu or cpu")
 
     # model
@@ -82,7 +84,13 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
     """build dataset"""
-    data = EmbDataset(args.data_path)
+    if args.collab_path and args.semantic_path:
+        print(f"Loading DualEmbDataset with collab_path={args.collab_path} and semantic_path={args.semantic_path}")
+        data = DualEmbDataset(args.collab_path, args.semantic_path)
+    else:
+        print(f"Loading Single EmbDataset with data_path={args.data_path}")
+        data = EmbDataset(args.data_path)
+
     model = RQVAE(config=vars(args), in_dim=data.dim)
     # model = RQVAE(args=args, in_dim=data.dim)
     print(model)

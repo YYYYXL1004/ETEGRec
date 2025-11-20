@@ -43,8 +43,37 @@ def train(config, verbose=True, rank=0):
     data_path = config["data_path"]
     dataset = config["dataset"]
     dataset_path = os.path.join(data_path, dataset)
-    semantic_emb_path = os.path.join(dataset_path, config["semantic_emb_path"])
+
+    # Dual SCID Logic
+    collab_emb_file = config.get("collab_emb_path")
+    text_emb_file = config.get("text_emb_path")
     
+    if collab_emb_file and text_emb_file:
+        collab_emb_path = os.path.join(dataset_path, collab_emb_file)
+        text_emb_path = os.path.join(dataset_path, text_emb_file)
+        
+        logger.info(f"Loading Dual Embeddings: {collab_emb_path} + {text_emb_path}")
+        
+        collab_emb = np.load(collab_emb_path)
+        text_emb = np.load(text_emb_path)
+        
+        # Handle PAD token mismatch (Text emb usually has PAD at index 0)
+        if len(text_emb) == len(collab_emb) + 1:
+            logger.info("Detected PAD token in Text embeddings. Slicing [1:] to align with Collab.")
+            text_emb = text_emb[1:]
+            
+        assert len(collab_emb) == len(text_emb), f"Length mismatch: {len(collab_emb)} vs {len(text_emb)}"
+        
+        semantic_emb = np.concatenate((collab_emb, text_emb), axis=-1)
+        config['semantic_hidden_size'] = semantic_emb.shape[-1] # Should be 1024
+        logger.info(f"Dual SCID enabled. New semantic_hidden_size: {config['semantic_hidden_size']}")
+        
+    else:
+        # Original Logic
+        semantic_emb_path = os.path.join(dataset_path, config["semantic_emb_path"])
+        semantic_emb = np.load(semantic_emb_path)
+        # config['semantic_hidden_size'] is already set in yaml (e.g. 256)
+
     
     accelerator.wait_for_everyone()
     # Initialize the model with the custom configuration
@@ -70,7 +99,7 @@ def train(config, verbose=True, rank=0):
                   code_length=code_length, code_number=code_num)
     
 
-    semantic_emb = np.load(semantic_emb_path)
+    # semantic_emb is already loaded above
         
     model_rec.semantic_embedding.weight.data[1:] = torch.tensor(semantic_emb).to(config['device'])
     model_id = RQVAE(config=config, in_dim=model_rec.semantic_hidden_size)
