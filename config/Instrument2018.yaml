@@ -74,3 +74,14 @@ kmeans_iters: 100
 dropout_prob: 0.0
 bn: False
 loss_type: mse
+
+# training stage: sft, dpo, sft_dpo
+stage: dpo
+
+# dpo params
+dpo_model_path: myckpt/Instrument2018/Nov-18-2025_10-32-d3c5af/6.pt
+dpo_beta: 0.1
+dpo_epochs: 5
+dpo_lr: 5e-6
+dpo_batch_size: 64
+dpo_gradient_accumulation_steps: 1
