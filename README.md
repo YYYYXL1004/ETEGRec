@@ -24,7 +24,11 @@ transformers
 
 ## Dataset
 
-You can download the SASRec embeddings, pretrained RQVAE weights and interaction data used in our paper from [Google Drive](https://drive.google.com/drive/folders/1KiPpB7uq7eFc4qB74cFOxhtY3H8nWgAI?usp=sharing) 
+<!-- You can download the SASRec embeddings, pretrained RQVAE weights and interaction data used in our paper from [Google Drive](https://drive.google.com/drive/folders/1KiPpB7uq7eFc4qB74cFOxhtY3H8nWgAI?usp=sharing)  -->
+cd RecBole
+python prepare_data_2018.py  // prepare data
+python train_sasrec.py  // generate sasrec embeddings
+python generate_text_embeddings.py  // generate text embeddings
 
 
 ## RQVAE Pretrain
