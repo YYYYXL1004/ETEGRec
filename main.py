@@ -99,11 +99,59 @@ def train(config, verbose=True, rank=0):
     trainer = Trainer(config=config, model_rec=model_rec, model_id=model_id, accelerator=accelerator, train_data=train_data_loader,
                       valid_data=valid_data_loader, test_data=test_data_loader, eos_token_id=eos_token_id)
     
-    best_score_pre = trainer.train(verbose=verbose)
-    test_results_pre = trainer.test()
+    # Initialize metrics to 0 or None
+    best_score_pre = 0.0
+    test_results_pre = {}
+    best_score = 0.0
+    test_results = {}
 
-    best_score = trainer.finetune(verbose=verbose)
-    test_results = trainer.test()
+    # 解析训练阶段 stage (sft / dpo / sft_dpo)
+    stage = config.get('stage', 'sft')
+    
+    accelerator.print(f"\n>>> Current Training Stage: {stage.upper()}")
+
+    # === 1. SFT 阶段 (Pre-train + Finetune) ===
+    if stage in ['sft', 'sft_dpo']:
+        best_score_pre = trainer.train(verbose=verbose)
+        test_results_pre = trainer.test()
+
+        best_score = trainer.finetune(verbose=verbose)
+        test_results = trainer.test()
+    elif stage == 'dpo':
+        accelerator.print(">>> Skipping SFT stage (Direct DPO).")
+
+    # === 2. DPO 阶段 ===
+    if stage in ['dpo', 'sft_dpo']:
+        accelerator.print("\n>>> Starting DPO Alignment Stage...")
+        
+        # 确定要加载的 Checkpoint
+        # 优先用刚才 finetune 出来的 best_ckpt (如果跑了的话)，如果没有则用 config 里指定的
+        sft_ckpt = trainer.best_ckpt if trainer.best_ckpt else config.get('dpo_model_path')
+        
+        if sft_ckpt:
+            accelerator.print(f"Loading SFT Checkpoint for DPO: {sft_ckpt}")
+            
+            # 执行 DPO 训练
+            trainer.train_dpo(saved_sft_ckpt=sft_ckpt, verbose=verbose)
+            
+            # 测试 DPO 后的模型
+            # 显式指定加载 DPO 保存的最终模型进行测试
+            dpo_final_ckpt = os.path.join(trainer.save_path, "dpo_final.pt")
+            if os.path.exists(dpo_final_ckpt):
+                accelerator.print(f"Testing DPO model: {dpo_final_ckpt}")
+                test_results_dpo = trainer.test(model_file=dpo_final_ckpt)
+            else:
+                accelerator.print("Warning: DPO final checkpoint not found. Testing current in-memory model.")
+                test_results_dpo = trainer.test(model_file=None)
+
+            if accelerator.is_main_process:
+                log(f"DPO Stage Finished. Test Results: {test_results_dpo}", accelerator, logger)
+            
+            # Update global results for final logging
+            test_results = test_results_dpo
+            best_score = test_results.get('ndcg@10', 0.0) # Use ndcg@10 as the representative score
+        else:
+            accelerator.print("Error: No SFT checkpoint found for DPO. Please specify 'dpo_model_path' or run SFT first.")
     
     
     if accelerator.is_main_process:
@@ -111,6 +159,10 @@ def train(config, verbose=True, rank=0):
         log(f"Pre Test Results: {test_results_pre}", accelerator, logger)
         log(f"Best Validation Score: {best_score}", accelerator, logger)
         log(f"Test Results: {test_results}", accelerator, logger)
+    
+    # Clean up distributed process group to avoid warnings
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__=="__main__":

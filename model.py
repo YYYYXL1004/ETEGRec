@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from typing import Optional
 from transformers import GenerationMixin
@@ -70,6 +71,39 @@ class Model(nn.Module, GenerationMixin):
         if isinstance(module, nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
 
+    def compute_log_probs(self, input_ids, attention_mask, labels):
+        """
+        计算给定序列的 Log Probabilities (对数概率)，用于 DPO 训练。
+        
+        Args:
+            input_ids: (batch, seq_len) 输入的 Context
+            attention_mask: (batch, seq_len)
+            labels: (batch, code_len) - 目标 Code 序列 (Chosen 或 Rejected)
+        Returns:
+            log_probs: (batch,) - 整个序列的对数概率之和
+        """
+        outputs = self.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels
+        )
+        
+        logits = outputs.logits # (batch, code_len, code_num)
+        
+        # 计算 Log Softmax
+        log_probs = F.log_softmax(logits, dim=-1)
+        
+        # 提取 Label 对应的 Log Probability
+        # labels: (batch, code_len)
+        # logits: (batch, code_len, code_num)
+        
+        labels = labels.unsqueeze(-1) # (batch, code_len, 1)
+        # gather: 沿着最后一个维度 (code_num) 收集 label 对应的概率
+        selected_log_probs = torch.gather(log_probs, -1, labels).squeeze(-1) # (batch, code_len)
+        
+        # 对序列长度求和，得到整个轨迹 (Trajectory) 的 Log Probability
+        return selected_log_probs.sum(dim=-1)
+
     def prepare_inputs_for_generation(self, input_ids, attention_mask=None, encoder_outputs=None, **kwargs):
         return {"decoder_input_ids": input_ids, "encoder_outputs": encoder_outputs, "attention_mask": attention_mask}
 
@@ -85,9 +119,14 @@ class Model(nn.Module, GenerationMixin):
         attention_mask_flatten = attention_mask.reshape(-1)
 
         inputs_embeds = torch.zeros(*input_ids.shape, self.hidden_size, device=self.device)
-        input_ids[input_ids==-1] = 0
+        
+        # 修复 inplace 操作导致的 RuntimeError
+        # 不要直接修改 input_ids，因为它是引用传递，会影响计算图中的其他部分
+        input_ids_safe = input_ids.clone()
+        input_ids_safe[input_ids_safe==-1] = 0
+        
         for i in range(self.code_length):
-            inputs_embeds[:, i::self.code_length] = self.token_embeddings[i](input_ids[:, i::self.code_length])
+            inputs_embeds[:, i::self.code_length] = self.token_embeddings[i](input_ids_safe[:, i::self.code_length])
         
         inputs_embeds = inputs_embeds.view(-1, self.hidden_size)
         inputs_embeds[~attention_mask_flatten] = self.model.shared.weight[0]
