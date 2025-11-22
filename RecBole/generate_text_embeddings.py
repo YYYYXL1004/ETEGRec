@@ -17,7 +17,8 @@ DATASET_NAME = "Instrument2018"
 DATASET_DIR = f"./dataset/{DATASET_NAME}"
 META_FILE = f"{DATASET_DIR}/meta_Musical_Instruments.json"
 ITEM2ID_FILE = f"{DATASET_DIR}/{DATASET_NAME}.emb_map.json"
-MODEL_NAME = "sentence-transformers/sentence-t5-base"  
+MODEL_NAME = "sentence-transformers/sentence-t5-base" 
+# MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIM = 768
 
 # 模型配置 - 使用本地路径或镜像
