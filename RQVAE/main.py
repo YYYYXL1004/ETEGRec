@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument('--sk_epsilons', type=float, nargs='+', default=[0.0, 0.0, 0.0, 0.003], help="sinkhorn epsilons")
     parser.add_argument("--sk_iters", type=int, default=50, help="max sinkhorn iters")
     parser.add_argument("--moving_avg_decay", type=int, default=0.99, help="moving_average decay")
-
+    parser.add_argument("--normalize", type=bool, default=False, help="use normalize or not")
 
     #save
     parser.add_argument('--save_limit', type=int, default=3)
@@ -85,8 +85,8 @@ if __name__ == '__main__':
 
     """build dataset"""
     if args.collab_path and args.semantic_path:
-        print(f"Loading DualEmbDataset with collab_path={args.collab_path} and semantic_path={args.semantic_path}")
-        data = DualEmbDataset(args.collab_path, args.semantic_path)
+        print(f"Loading DualEmbDataset with collab_path={args.collab_path} and semantic_path={args.semantic_path}, normalize={args.normalize}")
+        data = DualEmbDataset(args.collab_path, args.semantic_path, normalize=args.normalize)
     else:
         print(f"Loading Single EmbDataset with data_path={args.data_path}")
         data = EmbDataset(args.data_path)

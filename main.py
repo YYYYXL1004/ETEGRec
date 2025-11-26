@@ -64,6 +64,14 @@ def train(config, verbose=True, rank=0):
             
         assert len(collab_emb) == len(text_emb), f"Length mismatch: {len(collab_emb)} vs {len(text_emb)}"
         
+        # Normalize embeddings to unit sphere if configured
+        if config.get('normalize', False):
+            logger.info("Normalizing Dual Embeddings to unit sphere...")
+            collab_emb = collab_emb / (np.linalg.norm(collab_emb, axis=1, keepdims=True) + 1e-9)
+            text_emb = text_emb / (np.linalg.norm(text_emb, axis=1, keepdims=True) + 1e-9)
+        else:
+            logger.info("Skipping Normalization (using raw embeddings)...")
+        
         semantic_emb = np.concatenate((collab_emb, text_emb), axis=-1)
         config['semantic_hidden_size'] = semantic_emb.shape[-1] # Should be 1024
         logger.info(f"Dual SCID enabled. New semantic_hidden_size: {config['semantic_hidden_size']}")

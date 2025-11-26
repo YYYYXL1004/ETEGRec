@@ -23,7 +23,7 @@ class EmbDataset(data.Dataset):
 
 class DualEmbDataset(data.Dataset):
 
-    def __init__(self, collab_path, semantic_path):
+    def __init__(self, collab_path, semantic_path, normalize=False):
         self.collab_embeddings = np.load(collab_path)
         self.semantic_embeddings = np.load(semantic_path)
         
@@ -35,6 +35,15 @@ class DualEmbDataset(data.Dataset):
             
         assert len(self.collab_embeddings) == len(self.semantic_embeddings), \
             f"Length mismatch: Collab {len(self.collab_embeddings)} vs Semantic {len(self.semantic_embeddings)}"
+            
+        # Normalize embeddings to unit sphere to balance contribution to MSE Loss
+        if normalize:
+            print("Normalizing Collab and Semantic embeddings to unit sphere...")
+            self.collab_embeddings = self.collab_embeddings / (np.linalg.norm(self.collab_embeddings, axis=1, keepdims=True) + 1e-9)
+            self.semantic_embeddings = self.semantic_embeddings / (np.linalg.norm(self.semantic_embeddings, axis=1, keepdims=True) + 1e-9)
+        else:
+            print("Skipping Normalization (using raw embeddings)...")
+        
         self.dim = self.collab_embeddings.shape[-1] + self.semantic_embeddings.shape[-1]
 
     def __getitem__(self, index):
