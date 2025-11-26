@@ -7,6 +7,7 @@ map_path: .emb_map.json
 semantic_emb_path: Instrument2018_emb_256.npy
 collab_emb_path: Instrument2018_emb_256.npy
 text_emb_path: Instrument2018_text_768.npy
+normalize: False # Whether to normalize embeddings to unit sphere
 semantic_hidden_size: 256 # Will be updated to 1024 if Dual SCID is active
 code_num: 256
 code_length: 4
@@ -62,7 +63,7 @@ num_beams: 20
 alpha: 1
 warm_epoch: 10
 # rqvae_path: ./RQVAE/rqvae_ckpt/Instrument2018/Nov-18-2025_10-23-09/best_collision_model.pth
-rqvae_path: ./RQVAE/rqvae_ckpt/DualSCID/Nov-21-2025_23-29-32/best_collision_model.pth 
+rqvae_path: ./RQVAE/rqvae_ckpt/DualSCID/Nov-26-2025_19-33-53/best_collision_model.pth 
 
 #rqvae
 num_emb_list: [256,256,256]

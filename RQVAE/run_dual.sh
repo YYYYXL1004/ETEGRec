@@ -29,3 +29,4 @@ python -u main.py \
   --collab_path $COLLAB_PATH \
   --semantic_path $SEMANTIC_PATH \
   --ckpt_dir $CKPT_DIR
+  # --normalize  # Uncomment to enable normalization
