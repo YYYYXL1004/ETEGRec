@@ -13,6 +13,54 @@
             "cwd": "${workspaceFolder}/RecBole"
         },
         {
+            "name": "Debug RQVAE (Pretrain)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/RQVAE/main.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/RQVAE",
+            "args": [
+                "--lr", "1e-3",
+                "--epochs", "500",
+                "--batch_size", "1024",
+                "--e_dim", "128",
+                "--quant_loss_weight", "1.0",
+                "--beta", "0.25",
+                "--num_emb_list", "256", "256", "256",
+                "--sk_epsilons", "0.0", "0.0", "0.0",
+                "--layers", "512", "256",
+                "--vq_type", "vq",
+                "--loss_type", "mse",
+                "--dist", "l2",
+                "--device", "cuda:0",
+                "--kmeans_init", "True",
+                "--data_path", "../dataset/instrument/instrument_emb_256.npy",
+                "--ckpt_dir", "./debug_ckpt"
+            ]
+        },
+        {
+            "name": "Debug ETEGRec (Instrument2018 - Fast Debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--config=./config/Instrument2018.yaml",
+                "--lr_rec=0.005",
+                "--lr_id=0.0001",
+                "--cycle=2",
+                "--eval_step=1", 
+                "--rec_kl_loss=0.0001",
+                "--rec_dec_cl_loss=0.0003",
+                "--id_kl_loss=0.0001",
+                "--id_dec_cl_loss=0.0003",
+                "--data_ratio=0.01",
+                "--log_dir=./debug_logs"
+            ],
+            "justMyCode": true
+        },
+        {
             "name": "Debug ETEGRec instrument",
             "type": "debugpy",
             "request": "launch",

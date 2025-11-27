@@ -171,6 +171,7 @@ class Trainer(object):
                                           
     @staticmethod
     def compute_contrastive_loss(query_embeds, semantic_embeds, temperature=0.07, sim="cos", gathered=True):
+        # InfoNCE loss
         if gathered:
             gathered_query_embeds = Trainer.gather_tensors(query_embeds)
             gathered_semantic_embeds = Trainer.gather_tensors(semantic_embeds)
@@ -370,8 +371,8 @@ class Trainer(object):
           
                 logits = outputs.logits  # (batch, code_len, code_num)
 
-                seq_project_latents = outputs.seq_project_latents
-                dec_latents = outputs.dec_latents
+                seq_project_latents = outputs.seq_project_latents  # SIA的序列表示 [Batch, hidden_size]
+                dec_latents = outputs.dec_latents  # PSA的解码器的表示 [Batch, hidden_size]
                 
                 if dist.is_initialized():
                     _, _, _, _, seq_code_logits = self.model_id.module.rq(seq_project_latents)
@@ -512,17 +513,17 @@ class Trainer(object):
 
         for epoch_idx in range(self.epochs):
                 
-            if epoch_idx % self.cycle == 0:
+            if epoch_idx % self.cycle == 0: # 训练tokenizer
                 loss_w['vq_loss'] = self.config['id_vq_loss']
                 loss_w['code_loss'] = self.config['id_code_loss'] if epoch_idx >= self.warm_epoch else 0
                 loss_w['kl_loss'] = self.config['id_kl_loss'] if epoch_idx >= self.warm_epoch else 0
                 loss_w['dec_cl_loss'] = self.config['id_dec_cl_loss'] if epoch_idx >= self.warm_epoch else 0
 
-                for name, param in self.model_rec.named_parameters():
+                for name, param in self.model_rec.named_parameters(): # 冻结rec
                     param.requires_grad = False
                 for param in self.model_id.parameters():
                     param.requires_grad = True
-            else:
+            else:   # 训练rec
                 loss_w['vq_loss'] = self.config['rec_vq_loss']
                 loss_w['code_loss'] = self.config['rec_code_loss']
                 loss_w['kl_loss'] = self.config['rec_kl_loss'] if epoch_idx >= self.warm_epoch else 0

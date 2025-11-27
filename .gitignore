@@ -7,6 +7,7 @@ dataset/*
 __pycache__/
 
 RQVAE/__pycache__
+RQVAE/debug_ckpt
 RecBole/dataset
 RecBole/log
 RecBole/log_tensorboard
