@@ -241,9 +241,9 @@ class Trainer(object):
                 
                 target_flatten = targets.flatten()
                 if dist.is_initialized():
-                    target_semantic_embs = self.model_rec.module.semantic_embedding(target_flatten)
+                    target_semantic_embs = self.model_rec.module.get_semantic_embedding(target_flatten)
                 else:
-                    target_semantic_embs = self.model_rec.semantic_embedding(target_flatten)
+                    target_semantic_embs = self.model_rec.get_semantic_embedding(target_flatten)
                 target_recon_embs, _, _, _, target_code_logits = \
                 self.model_id(target_semantic_embs)
 
@@ -348,9 +348,9 @@ class Trainer(object):
                 
                 target_flatten = targets.flatten()
                 if dist.is_initialized():
-                    target_semantic_embs = self.model_rec.module.semantic_embedding(target_flatten)
+                    target_semantic_embs = self.model_rec.module.get_semantic_embedding(target_flatten)
                 else:
-                    target_semantic_embs = self.model_rec.semantic_embedding(target_flatten)
+                    target_semantic_embs = self.model_rec.get_semantic_embedding(target_flatten)
                 target_recon_embs, _, _, _, target_code_logits = \
                 self.model_id(target_semantic_embs)
                 
@@ -358,9 +358,9 @@ class Trainer(object):
                 unq_input = torch.tensor(unq_input).to(self.device)
                 unq_index = torch.tensor(unq_index).to(self.device)
                 if dist.is_initialized():
-                    unq_semantic_embs = self.model_rec.module.semantic_embedding(unq_input)
+                    unq_semantic_embs = self.model_rec.module.get_semantic_embedding(unq_input)
                 else:
-                    unq_semantic_embs = self.model_rec.semantic_embedding(unq_input)
+                    unq_semantic_embs = self.model_rec.get_semantic_embedding(unq_input)
                 unq_recon_embs, commit_loss, _, _, _ = self.model_id(unq_semantic_embs)
 
 
@@ -529,9 +529,10 @@ class Trainer(object):
                 loss_w['dec_cl_loss'] = self.config['rec_dec_cl_loss'] if epoch_idx >= self.warm_epoch else 0
 
                 for name, param in self.model_rec.named_parameters():
-                    semantic_emb_name = 'module.semantic_embedding' if dist.is_initialized() else 'semantic_embedding'
-                    if not name.startswith(semantic_emb_name):
-                        param.requires_grad = True
+                    if 'text_embedding' in name:
+                         param.requires_grad = False
+                    else:
+                         param.requires_grad = True
                 for param in self.model_id.parameters():
                     param.requires_grad = False
 
@@ -611,7 +612,7 @@ class Trainer(object):
         self.all_item_code = torch.tensor(all_item_code).to(self.device)
 
         for name, param in self.model_rec.named_parameters():
-            if not name.startswith('module.semantic_embedding'):
+            if not name.startswith('module.text_embedding') and not name.startswith('text_embedding'):
                 param.requires_grad = True
 
         for param in self.model_id.parameters():
@@ -751,10 +752,14 @@ class Trainer(object):
         self.model_rec.eval()
         self.model_id.eval()
         if dist.is_initialized():
-            all_item_embs = self.model_rec.module.semantic_embedding.weight.data[1:]
+            collab = self.model_rec.module.collab_embedding.weight.data[1:]
+            text = self.model_rec.module.text_embedding.weight.data[1:]
+            all_item_embs = torch.cat([collab, text], dim=-1)
             all_item_prefix = self.model_id.module.get_indices(all_item_embs).detach().cpu().numpy()
         else:
-            all_item_embs = self.model_rec.semantic_embedding.weight.data[1:]
+            collab = self.model_rec.collab_embedding.weight.data[1:]
+            text = self.model_rec.text_embedding.weight.data[1:]
+            all_item_embs = torch.cat([collab, text], dim=-1)
             all_item_prefix = self.model_id.get_indices(all_item_embs).detach().cpu().numpy()
         
 

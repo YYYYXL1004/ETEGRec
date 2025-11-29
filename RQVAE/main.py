@@ -57,6 +57,12 @@ def parse_args():
     parser.add_argument("--sk_iters", type=int, default=50, help="max sinkhorn iters")
     parser.add_argument("--moving_avg_decay", type=int, default=0.99, help="moving_average decay")
     parser.add_argument("--normalize", type=bool, default=False, help="use normalize or not")
+    
+    # Fusion args
+    parser.add_argument("--fusion_type", type=str, default=None, help="gate or None")
+    parser.add_argument("--collab_dim", type=int, default=0, help="dimension of collab emb")
+    parser.add_argument("--text_dim", type=int, default=0, help="dimension of text emb")
+    parser.add_argument("--fusion_dim", type=int, default=0, help="dimension of fused emb")
 
     #save
     parser.add_argument('--save_limit', type=int, default=3)

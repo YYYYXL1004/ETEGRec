@@ -28,5 +28,9 @@ python -u main.py \
   --kmeans_init True \
   --collab_path $COLLAB_PATH \
   --semantic_path $SEMANTIC_PATH \
-  --ckpt_dir $CKPT_DIR
+  --ckpt_dir $CKPT_DIR \
+  --fusion_type gate \
+  --collab_dim 256 \
+  --text_dim 768 \
+  --fusion_dim 1024
   # --normalize  # Uncomment to enable normalization

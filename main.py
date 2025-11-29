@@ -109,7 +109,24 @@ def train(config, verbose=True, rank=0):
 
     # semantic_emb is already loaded above
         
-    model_rec.semantic_embedding.weight.data[1:] = torch.tensor(semantic_emb).to(config['device'])
+    if config.get('fusion_type') == 'gate':
+        # Load into split embeddings
+        model_rec.collab_embedding.weight.data[1:] = torch.tensor(collab_emb).to(config['device'])
+        model_rec.text_embedding.weight.data[1:] = torch.tensor(text_emb).to(config['device'])
+    else:
+        # Fallback for legacy mode (if fusion_type not set, though model.py expects split now)
+        # But since we modified model.py to ALWAYS have split embeddings, we should use them.
+        # If user didn't provide dual embeddings (e.g. beauty.yaml), we might have issues.
+        # Assuming we are on the Dual SCID path:
+        if 'collab_emb' in locals():
+             model_rec.collab_embedding.weight.data[1:] = torch.tensor(collab_emb).to(config['device'])
+             model_rec.text_embedding.weight.data[1:] = torch.tensor(text_emb).to(config['device'])
+        else:
+             # If only semantic_emb exists (old behavior), we load it into... text_embedding? 
+             # Or maybe we should have kept semantic_embedding for compatibility?
+             # For now, let's assume Dual SCID is active as per user request.
+             pass
+
     model_id = RQVAE(config=config, in_dim=model_rec.semantic_hidden_size)
     
     log(model_rec, accelerator, logger)

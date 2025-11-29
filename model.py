@@ -36,14 +36,25 @@ class Model(nn.Module, GenerationMixin):
         self.can_generate = lambda: True
 
         self.hidden_size = model.config.hidden_size
-        self.semantic_hidden_size = config.get('semantic_hidden_size')
+        self.semantic_hidden_size = config.get('semantic_hidden_size') # Total dim (e.g. 1024)
+        
+        # Dual Embedding Config
+        self.collab_dim = config.get('collab_dim', 256) 
+        self.text_dim = config.get('text_dim', 768)
+        
         self.n_items = n_items
         self.code_length = code_length
         self.code_number = code_number
         self.num_beams = config['num_beams']
         
-        self.semantic_embedding = nn.Embedding(self.n_items, self.semantic_hidden_size)
-        self.semantic_embedding.requires_grad_(False)
+        # Split Embeddings
+        # 1. Collab (ID) Embedding - Trainable
+        self.collab_embedding = nn.Embedding(self.n_items, self.collab_dim)
+        self.collab_embedding.requires_grad_(True) # Allow fine-tuning of ID features
+        
+        # 2. Text (Semantic) Embedding - Frozen
+        self.text_embedding = nn.Embedding(self.n_items, self.text_dim)
+        self.text_embedding.requires_grad_(False) # Freeze text features
         
         self.token_embeddings = nn.ModuleList([nn.Embedding(self.code_number, self.hidden_size) for i in range(self.code_length)])
         self.token_embeddings.requires_grad_(True)
@@ -58,6 +69,12 @@ class Model(nn.Module, GenerationMixin):
         
         # parameters initialization
         self.apply(self._init_weights)
+
+    def get_semantic_embedding(self, ids):
+        """Concatenate Collab and Text embeddings on the fly"""
+        collab = self.collab_embedding(ids)
+        text = self.text_embedding(ids)
+        return torch.cat([collab, text], dim=-1)
 
     def _init_weights(self, module):
         """Initialize the weights"""

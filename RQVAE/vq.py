@@ -5,12 +5,45 @@ import torch.nn.functional as F
 from layers import *
 
 
+class GatedFusion(nn.Module):
+    def __init__(self, dim1, dim2, out_dim):
+        super(GatedFusion, self).__init__()
+        self.proj1 = nn.Linear(dim1, out_dim)
+        self.proj2 = nn.Linear(dim2, out_dim)
+        # Gate network: Learns to weigh dim1 (ID) vs dim2 (Text)
+        # Input: Raw concatenated features
+        self.gate_net = nn.Sequential(
+            nn.Linear(dim1 + dim2, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x1, x2):
+        # Project both to same semantic space
+        h1 = self.proj1(x1)
+        h2 = self.proj2(x2)
+        
+        # Compute dynamic gate
+        raw_concat = torch.cat([x1, x2], dim=-1)
+        gate = self.gate_net(raw_concat) # (B, 1), 1 means full ID, 0 means full Text
+        
+        # Weighted Fusion
+        h_fused = gate * h1 + (1 - gate) * h2
+        return h_fused, gate
+
 class RQVAE(nn.Module):
     def __init__(self, config, in_dim=768,):
         super(RQVAE, self).__init__()
 
         self.in_dim = in_dim
         self.e_dim = config['e_dim']
+        
+        # Fusion Configuration
+        self.fusion_type = config.get('fusion_type', None)
+        self.collab_dim = config.get('collab_dim', 0)
+        self.text_dim = config.get('text_dim', 0)
+        self.fusion_dim = config.get('fusion_dim', self.in_dim) # Default to in_dim if not set
 
         self.layers = config['layers']
         self.dropout_prob = config['dropout_prob']
@@ -20,9 +53,19 @@ class RQVAE(nn.Module):
         self.vq_type = config['vq_type']
         self.loss_type = config['loss_type']
         self.tau = config['tau']
-        if self.vq_type in ["vq"]:
+        
+        if self.fusion_type == 'gate':
+            assert self.collab_dim > 0 and self.text_dim > 0, "Must provide collab_dim and text_dim for fusion"
+            self.fusion_layer = GatedFusion(self.collab_dim, self.text_dim, self.fusion_dim)
+            # Encoder input becomes fusion_dim
+            self.encode_layer_dims = [self.fusion_dim] + self.layers + [self.e_dim]
+        else:
+            # Standard behavior
             self.encode_layer_dims = [self.in_dim] + self.layers + [self.e_dim]
-            self.decode_layer_dims = self.encode_layer_dims[::-1]
+
+        if self.vq_type in ["vq"]:
+            # Decoder reconstructs the ORIGINAL input (in_dim), not the fused one
+            self.decode_layer_dims = [self.e_dim] + self.layers[::-1] + [self.in_dim]
         else:
             raise NotImplementedError
 
@@ -34,7 +77,17 @@ class RQVAE(nn.Module):
                                  dropout=self.dropout_prob,bn=self.bn)
 
     def forward(self, x):
-        latent = self.encoder(x)
+        if self.fusion_type == 'gate':
+            # Split input back to Collab (ID) and Text
+            x_collab = x[:, :self.collab_dim]
+            x_text = x[:, self.collab_dim:]
+            
+            # Fuse
+            x_fused, gate = self.fusion_layer(x_collab, x_text)
+            latent = self.encoder(x_fused)
+        else:
+            latent = self.encoder(x)
+            
         x_q, rq_loss, indices, code_one_hot, logit = self.rq(latent)
         out = self.decoder(x_q)
 
@@ -42,12 +95,21 @@ class RQVAE(nn.Module):
 
     @torch.no_grad()
     def get_indices(self, xs):
+        if self.fusion_type == 'gate':
+            x_collab = xs[:, :self.collab_dim]
+            x_text = xs[:, self.collab_dim:]
+            xs, _ = self.fusion_layer(x_collab, x_text)
+
         x_e = self.encoder(xs)
         indices = self.rq.get_indices(x_e)
         return indices
 
     @torch.no_grad()
     def get_maxk_indices(self, xs, maxk=1, used=False):
+        if self.fusion_type == 'gate':
+            x_collab = xs[:, :self.collab_dim]
+            x_text = xs[:, self.collab_dim:]
+            xs, _ = self.fusion_layer(x_collab, x_text)
 
         x_e = self.encoder(xs)
         all_indices, fix = self.rq.get_maxk_indices(x_e, maxk=maxk, used=used)

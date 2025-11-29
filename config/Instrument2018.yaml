@@ -63,7 +63,7 @@ num_beams: 20
 alpha: 1
 warm_epoch: 10
 # rqvae_path: ./RQVAE/rqvae_ckpt/Instrument2018/Nov-18-2025_10-23-09/best_collision_model.pth
-rqvae_path: ./RQVAE/rqvae_ckpt/DualSCID/Nov-26-2025_19-33-53/best_collision_model.pth 
+rqvae_path: ./RQVAE/rqvae_ckpt/DualSCID/Nov-29-2025_02-26-21/best_collision_model.pth 
 
 #rqvae
 num_emb_list: [256,256,256]
@@ -78,3 +78,9 @@ kmeans_iters: 100
 dropout_prob: 0.0
 bn: False
 loss_type: mse
+
+# Fusion Configuration (Semantic-Enhanced ID)
+fusion_type: gate
+collab_dim: 256
+text_dim: 768
+fusion_dim: 1024
