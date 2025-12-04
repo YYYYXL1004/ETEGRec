@@ -98,8 +98,9 @@ if __name__ == '__main__':
                              batch_size=args.batch_size, shuffle=True,
                              pin_memory=True)
     trainer = Trainer(args,model, len(data_loader))
-    best_loss, best_collision_rate = trainer.fit(data_loader)
+    best_loss, best_collision_rate, best_gini = trainer.fit(data_loader)
 
     print("Best Loss",best_loss)
     print("Best Collision Rate", best_collision_rate)
+    print("Best Gini", best_gini)
 

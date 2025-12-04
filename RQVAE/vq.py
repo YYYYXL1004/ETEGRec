@@ -5,6 +5,30 @@ import torch.nn.functional as F
 from layers import *
 
 
+def compute_gini(codes, code_num):
+    """
+    Calculate Gini coefficient for Codebook utilization.
+    codes: list or array of code indices
+    code_num: size of the codebook
+    """
+    if isinstance(codes, torch.Tensor):
+        codes = codes.cpu().numpy()
+    
+    counts = np.zeros(code_num)
+    unique, u_counts = np.unique(codes, return_counts=True)
+    counts[unique] = u_counts
+    
+    # Sort counts
+    counts = np.sort(counts)
+    
+    # Calculate Gini
+    n = code_num
+    index = np.arange(1, n + 1)
+    if counts.sum() == 0:
+        return 0.0
+    return ((2 * index - n - 1) * counts).sum() / (n * counts.sum())
+
+
 class RQVAE(nn.Module):
     def __init__(self, config, in_dim=768,):
         super(RQVAE, self).__init__()
