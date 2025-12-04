@@ -8,6 +8,7 @@ from tqdm import tqdm
 from transformers import get_linear_schedule_with_warmup, get_constant_schedule_with_warmup
 
 from utils import ensure_dir,set_color,get_local_time, delete_file
+from vq import compute_gini
 import os
 
 import heapq
@@ -41,8 +42,10 @@ class Trainer(object):
 
         self.best_loss = np.inf
         self.best_collision_rate = np.inf
-        self.best_loss_ckpt = "best_loss_model.pth"
-        self.best_collision_ckpt = "best_collision_model.pth"
+        self.best_gini = np.inf
+        self.best_loss_ckpt = None
+        self.best_collision_ckpt = None
+        self.best_gini_ckpt = None
         self.optimizer = self._build_optimizer()
         self.scheduler = self._get_scheduler()
         self.model = self.model.to(self.device)
@@ -139,28 +142,49 @@ class Trainer(object):
 
         indices_set = set()
         num_sample = 0
+        all_indices_list = []
         for batch_idx, data in enumerate(iter_data):
             num_sample += len(data)
             data = data.to(self.device)
             indices = self.model.get_indices(data)
-            indices = indices.view(-1,indices.shape[-1]).cpu().numpy()
-            for index in indices:
+            indices_np = indices.view(-1,indices.shape[-1]).cpu().numpy()
+            all_indices_list.append(indices_np)
+            for index in indices_np:
                 code = "-".join([str(int(_)) for _ in index])
                 indices_set.add(code)
 
         collision_rate = (num_sample - len(list(indices_set)))/num_sample
+        
+        # Calculate Gini
+        all_indices = np.concatenate(all_indices_list, axis=0)
+        L = all_indices.shape[1]
+        gini_list = []
+        n_e_list = self.model.rq.n_e_list
+        
+        for i in range(L):
+            code_num = n_e_list[i]
+            g = compute_gini(all_indices[:, i], code_num)
+            gini_list.append(g)
+            
+        avg_gini = np.mean(gini_list)
 
-        return collision_rate
+        return collision_rate, avg_gini
 
-    def _save_checkpoint(self, epoch, collision_rate=1, ckpt_file=None):
+    def _save_checkpoint(self, epoch, collision_rate=1, gini=None, ckpt_file=None):
 
-        ckpt_path = os.path.join(self.ckpt_dir,ckpt_file) if ckpt_file \
-            else os.path.join(self.ckpt_dir, 'epoch_%d_collision_%.4f_model.pth' % (epoch, collision_rate))
+        if ckpt_file:
+            ckpt_path = os.path.join(self.ckpt_dir, ckpt_file)
+        else:
+            if gini is not None:
+                ckpt_path = os.path.join(self.ckpt_dir, 'epoch_%d_collision_%.4f_gini_%.4f_model.pth' % (epoch, collision_rate, gini))
+            else:
+                ckpt_path = os.path.join(self.ckpt_dir, 'epoch_%d_collision_%.4f_model.pth' % (epoch, collision_rate))
         state = {
             "args": self.args,
             "epoch": epoch,
             "best_loss": self.best_loss,
             "best_collision_rate": self.best_collision_rate,
+            "best_gini": self.best_gini,
             "state_dict": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
         }
@@ -203,20 +227,35 @@ class Trainer(object):
             # eval
             if (epoch_idx + 1) % self.eval_step == 0:
                 valid_start_time = time()
-                collision_rate = self._valid_epoch(data)
+                collision_rate, avg_gini = self._valid_epoch(data)
 
                 if train_loss < self.best_loss:
                     self.best_loss = train_loss
+                    if self.best_loss_ckpt:
+                        delete_file(os.path.join(self.ckpt_dir, self.best_loss_ckpt))
+                    self.best_loss_ckpt = 'best_loss_%.4f_collision_%.4f_gini_%.4f.pth' % (train_loss, collision_rate, avg_gini)
                     self._save_checkpoint(epoch=epoch_idx, ckpt_file=self.best_loss_ckpt)
 
                 if collision_rate < self.best_collision_rate:
                     self.best_collision_rate = collision_rate
                     cur_eval_step = 0
+                    
+                    if self.best_collision_ckpt:
+                        delete_file(os.path.join(self.ckpt_dir, self.best_collision_ckpt))
+                    self.best_collision_ckpt = 'best_collision_%.4f_gini_%.4f.pth' % (collision_rate, avg_gini)
                     self._save_checkpoint(epoch_idx, collision_rate=collision_rate,
                                           ckpt_file=self.best_collision_ckpt)
                 else:
                     cur_eval_step += 1
-
+                
+                # Save best gini
+                if avg_gini < self.best_gini:
+                    self.best_gini = avg_gini
+                    
+                    if self.best_gini_ckpt:
+                        delete_file(os.path.join(self.ckpt_dir, self.best_gini_ckpt))
+                    self.best_gini_ckpt = 'best_gini_%.4f_collision_%.4f.pth' % (avg_gini, collision_rate)
+                    self._save_checkpoint(epoch_idx, collision_rate=collision_rate, gini=avg_gini, ckpt_file=self.best_gini_ckpt)
 
                 valid_end_time = time()
                 valid_score_output = (
@@ -225,11 +264,13 @@ class Trainer(object):
                     + set_color("time", "blue")
                     + ": %.2fs, "
                     + set_color("collision_rate", "blue")
+                    + ": %f, "
+                    + set_color("gini", "blue")
                     + ": %f]"
-                ) % (epoch_idx, valid_end_time - valid_start_time, collision_rate)
+                ) % (epoch_idx, valid_end_time - valid_start_time, collision_rate, avg_gini)
 
                 self.logger.info(valid_score_output)
-                ckpt_path = self._save_checkpoint(epoch_idx, collision_rate=collision_rate)
+                ckpt_path = self._save_checkpoint(epoch_idx, collision_rate=collision_rate, gini=avg_gini)
                 now_save = (-collision_rate, ckpt_path)
                 if len(self.newest_save_queue) < self.save_limit:
                     self.newest_save_queue.append(now_save)
@@ -254,9 +295,7 @@ class Trainer(object):
                     )
                     break
 
-
-
-        return self.best_loss, self.best_collision_rate
+        return self.best_loss, self.best_collision_rate, self.best_gini
 
 
 

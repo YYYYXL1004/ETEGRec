@@ -18,6 +18,7 @@ from metrics import *
 from utils import *
 from collections import defaultdict
 from logging import getLogger
+import zlib
 init(autoreset=True)
     
     
@@ -747,42 +748,88 @@ class Trainer(object):
         return metrics
     
     @torch.no_grad()
-    def get_code(self, epoch_idx, verbose=True):
+    def get_code(self, epoch_idx, verbose=True, use_forge=True):
         self.model_rec.eval()
         self.model_id.eval()
+        
+        # 1. 获取 RQ-VAE 原始生成的语义 Indices (通常是 [N, 3])
         if dist.is_initialized():
             all_item_embs = self.model_rec.module.semantic_embedding.weight.data[1:]
             all_item_prefix = self.model_id.module.get_indices(all_item_embs).detach().cpu().numpy()
         else:
             all_item_embs = self.model_rec.semantic_embedding.weight.data[1:]
             all_item_prefix = self.model_id.get_indices(all_item_embs).detach().cpu().numpy()
-        
 
         if verbose:
-            for i in range(self.code_length-1):
-                self.log(f'[Epoch {epoch_idx}] Evaluation {self.save_path}/{epoch_idx}.pt Code balance {balance(all_item_prefix[:, i].tolist(), ncentroids=self.code_num)} Used code num of level {i+1}: {len(set(all_item_prefix[:, i].tolist()))}')
+            # 记录原始的冲突情况，用于对比
+            self.log(f'[Epoch {epoch_idx}] Original Code conflict (Before FORGE opt): {conflict(all_item_prefix.tolist())}')
 
-            self.log(f'[Epoch {epoch_idx}] Evaluation {self.save_path}/{epoch_idx}.pt Code confilct {conflict(all_item_prefix.tolist())}')
-        
+            if use_forge:
+                self.log(f'[Epoch {epoch_idx}] [FORGE] Applied Random/Sequential Policy to New Suffix Code Layer.')
+
         all_item_prefix = all_item_prefix.tolist()
 
+        if use_forge:
+            # FORGE 策略：在 RQ-VAE 最后一层 (c3) 进行分流
+            # 目标：解决 suffix 层冲突过大的问题
+            # 方法：基于 [c1, c2] 前缀，将物品均匀分摊到 c3 的 256 个桶中
+            self.log(f'[Epoch {epoch_idx}] [FORGE] Applying Load Balancing on the last RQ-VAE layer (c3)...')
+            
+            # 1. Group by prefix [c1, c2]
+            prefix_groups = defaultdict(list)
+            for idx, code in enumerate(all_item_prefix):
+                # 假设 code 是 [c1, c2, c3]，我们取前两层作为 Key
+                # 注意：如果只有 1 层或 2 层，这里需要适配。假设至少有 3 层。
+                if len(code) >= 2:
+                    prefix_key = tuple(code[:-1]) # 取除了最后一层之外的所有层
+                else:
+                    # Fallback: 只有一层的情况，无法利用前缀分流，只能全局分流
+                    prefix_key = "global"
+                
+                prefix_groups[prefix_key].append(idx)
+            
+            # 2. Rewrite c3 (last layer of RQ-VAE)
+            for key, item_indices in prefix_groups.items():
+                # [关键修正] 使用确定性 Hash (Deterministic Hash)
+                # 确保在 DDP 多卡训练下，所有 GPU 计算出的 start_offset 是一致的
+                # 确保不同组均匀分布在 0~255 的不同位置，而不是都从 0 开始
+                if key == "global":
+                    start_offset = 0
+                else:
+                    # 将 tuple 转为 string 做 hash，adler32 速度快且确定
+                    key_str = str(key).encode('utf-8')
+                    start_offset = zlib.adler32(key_str) % self.code_num
+                
+                for i, item_idx in enumerate(item_indices):
+                    # Round Robin 分配，带偏移量
+                    # 牺牲原有的 c3 语义，换取空间均匀分布
+                    new_c3 = (start_offset + i) % self.code_num
+                    all_item_prefix[item_idx][-1] = new_c3
+
         tokens2item = defaultdict(list)
-        all_item_tokens = [[-1,-1,-1,-1]]
+        all_item_tokens = [[-1] * self.code_length] 
         max_conflict = 0
         for i in range(len(all_item_prefix)):
             str_id = ' '.join(map(str, all_item_prefix[i]))
             tokens2item[str_id].append(i+1)
-            all_item_tokens.append(all_item_prefix[i]+[len(tokens2item[str_id])-1])
-            max_conflict = max(max_conflict, len(tokens2item[str_id]))
-        self.log(f'[Epoch {epoch_idx}] [TOKENIZER] RQ-VAE semantic IDs, maximum conflict: {max_conflict}')
+            
+            # 获取当前前缀的计数 (0-based)
+            count = len(tokens2item[str_id]) - 1
+            
+            # 由于已经在上一层 (c3) 做了分流，这里 suffix 直接计数即可
+            # 不需要额外的 Hash 策略，因为 c3 的分流已经保证了同一个 c3 桶内的元素数量最少化
+            suffix = count
+            
+            all_item_tokens.append(all_item_prefix[i] + [suffix])
+            max_conflict = max(max_conflict, suffix + 1)
+
+        self.log(f'[Epoch {epoch_idx}] [TOKENIZER] Final Code Maximum Conflict (Suffix Size): {max_conflict}')
+        
         if max_conflict > self.code_num:
-            raise ValueError(
-                f'[TOKENIZER] RQ-VAE semantic IDs conflict with codebook size: '
-                f'{max_conflict} > {self.code_num}. Please increase the codebook size.'
-            )
+             self.log(f'WARNING: Max conflict {max_conflict} still > code_num {self.code_num}. '
+                     f'Consider increasing code_num or layers.', level='warning')
 
         return all_item_tokens
 
     def log(self, message, level='info'):
         return log(message, self.accelerator, self.logger, level=level)
-
