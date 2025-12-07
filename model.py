@@ -83,14 +83,17 @@ class Model(nn.Module, GenerationMixin):
     
     def get_input_embeddings(self, input_ids, attention_mask):
         attention_mask_flatten = attention_mask.reshape(-1)
+        device = input_ids.device  # 使用输入的设备，而非 self.device
 
-        inputs_embeds = torch.zeros(*input_ids.shape, self.hidden_size, device=self.device)
+        inputs_embeds = torch.zeros(*input_ids.shape, self.hidden_size, device=device)
+        # 避免 inplace 操作，clone 一份再修改
+        input_ids = input_ids.clone()
         input_ids[input_ids==-1] = 0
         for i in range(self.code_length):
             inputs_embeds[:, i::self.code_length] = self.token_embeddings[i](input_ids[:, i::self.code_length])
         
         inputs_embeds = inputs_embeds.view(-1, self.hidden_size)
-        inputs_embeds[~attention_mask_flatten] = self.model.shared.weight[0]
+        inputs_embeds[~attention_mask_flatten] = self.model.shared.weight[0].to(device)
         inputs_embeds = inputs_embeds.view(input_ids.shape[0], -1, self.hidden_size)
 
         return inputs_embeds
@@ -297,14 +300,15 @@ class Model(nn.Module, GenerationMixin):
         Each input sequence is replicated 'num_beams' times to provide separate candidate paths in beam search. Beam scores are initialized with 0 for the first beam and a very low number (-1e9) for others to ensure the first token of each sequence is chosen from the first beam.
         """
 
-        decoder_input_ids = torch.ones((batch_size * num_beams, 1), device=self.device, dtype=torch.long)
+        device = input_ids.device  # 始终使用输入的设备
+        decoder_input_ids = torch.ones((batch_size * num_beams, 1), device=device, dtype=torch.long)
         initial_decoder_input_ids = decoder_input_ids * self.config.decoder_start_token_id
 
-        beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
+        beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=device)
         beam_scores[:, 1:] = -1e9  # Set a low score for all but the first beam to ensure the first beam is selected initially
         initial_beam_scores = beam_scores.view((batch_size * num_beams,))
 
-        beam_idx_offset = torch.arange(batch_size, device=self.device).repeat_interleave(num_beams) * num_beams
+        beam_idx_offset = torch.arange(batch_size, device=device).repeat_interleave(num_beams) * num_beams
 
         input_ids = input_ids.repeat_interleave(num_beams, dim=0)
         attention_mask = attention_mask.repeat_interleave(num_beams, dim=0)
@@ -357,5 +361,132 @@ class Model(nn.Module, GenerationMixin):
         decoder_input_ids = torch.cat([decoder_input_ids[beam_idx + beam_idx_offset, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
 
         return decoder_input_ids, beam_scores
+
+    def sample_generate(
+        self,
+        input_ids,
+        attention_mask,
+        num_samples=4,
+        temperature=1.0,
+        top_k=50,
+        return_log_probs=False
+    ):
+        """
+        采样生成多个候选序列，用于 GRPO 训练
+        
+        Args:
+            input_ids: [B, seq_len] 用户历史序列的 code
+            attention_mask: [B, seq_len]
+            num_samples: 每个样本生成的候选数量 G
+            temperature: 采样温度，越高多样性越大
+            top_k: 只从 top-k 概率的 token 中采样
+            return_log_probs: 是否返回 log probabilities
+            
+        Returns:
+            gen_seqs: [B, num_samples, code_length] 生成的 code 序列
+            log_probs: [B, num_samples] 每个序列的 log probability (如果 return_log_probs=True)
+        """
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
+        
+        # Expand inputs for num_samples
+        input_ids_expanded = input_ids.repeat_interleave(num_samples, dim=0)  # [B*G, seq_len]
+        attention_mask_expanded = attention_mask.repeat_interleave(num_samples, dim=0)
+        
+        # Get input embeddings and encode
+        inputs_embeds = self.get_input_embeddings(input_ids_expanded, attention_mask_expanded)
+        
+        with torch.no_grad():
+            encoder_outputs = self.get_encoder()(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask_expanded,
+                return_dict=True
+            )
+        
+        # Initialize decoder input
+        decoder_input_ids = torch.full(
+            (batch_size * num_samples, 1),
+            self.config.decoder_start_token_id,
+            dtype=torch.long,
+            device=device
+        )
+        
+        all_log_probs = [] if return_log_probs else None
+        
+        # Autoregressive sampling
+        for step in range(self.code_length):
+            with torch.no_grad():
+                outputs = self.forward(
+                    encoder_outputs=encoder_outputs,
+                    attention_mask=attention_mask_expanded,
+                    decoder_input_ids=decoder_input_ids
+                )
+            
+            # Get logits for current step: [B*G, code_num]
+            next_token_logits = outputs.logits[:, -1, :] / temperature
+            
+            # Top-k filtering
+            if top_k > 0:
+                indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                next_token_logits[indices_to_remove] = float('-inf')
+            
+            # Sample from distribution
+            probs = torch.softmax(next_token_logits, dim=-1)
+            next_tokens = torch.multinomial(probs, num_samples=1)  # [B*G, 1]
+            
+            # Compute log probs if needed
+            if return_log_probs:
+                log_probs_step = torch.log_softmax(next_token_logits, dim=-1)
+                selected_log_probs = log_probs_step.gather(dim=-1, index=next_tokens)  # [B*G, 1]
+                all_log_probs.append(selected_log_probs)
+            
+            # Append to decoder_input_ids
+            decoder_input_ids = torch.cat([decoder_input_ids, next_tokens], dim=-1)
+        
+        # Remove the start token, get generated codes: [B*G, code_length]
+        gen_codes = decoder_input_ids[:, 1:]
+        
+        # Reshape to [B, G, code_length]
+        gen_codes = gen_codes.view(batch_size, num_samples, self.code_length)
+        
+        if return_log_probs:
+            # Sum log probs across steps: [B*G, code_length] -> [B*G] -> [B, G]
+            seq_log_probs = torch.cat(all_log_probs, dim=-1).sum(dim=-1)
+            seq_log_probs = seq_log_probs.view(batch_size, num_samples)
+            return gen_codes, seq_log_probs
+        
+        return gen_codes
+
+    def compute_log_probs(self, input_ids, attention_mask, target_codes):
+        """
+        计算给定 target_codes 的 log probability (Teacher Forcing)
+        用于 GRPO 的 policy gradient 计算
+        
+        Args:
+            input_ids: [B, seq_len] encoder 输入
+            attention_mask: [B, seq_len]
+            target_codes: [B, code_length] 需要计算 log prob 的目标序列
+            
+        Returns:
+            log_probs: [B] 每个序列的总 log probability
+        """
+        # Forward with target_codes as labels (teacher forcing)
+        outputs = self.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=target_codes
+        )
+        
+        # outputs.logits: [B, code_length, code_num]
+        log_probs = torch.log_softmax(outputs.logits, dim=-1)
+        
+        # Gather log probs for target tokens
+        # target_codes: [B, code_length] -> [B, code_length, 1]
+        token_log_probs = log_probs.gather(dim=-1, index=target_codes.unsqueeze(-1)).squeeze(-1)
+        
+        # Sum across sequence: [B, code_length] -> [B]
+        seq_log_probs = token_log_probs.sum(dim=-1)
+        
+        return seq_log_probs
 
     

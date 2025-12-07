@@ -831,5 +831,21 @@ class Trainer(object):
 
         return all_item_tokens
 
+    def build_code_to_item_index(self, all_item_code):
+        """
+        构建 Code 序列 -> Item ID 的反向索引
+        Args:
+            all_item_code: [n_items+1, code_length] tensor, index 0 是 padding
+        Returns:
+            code_to_item: dict, key=tuple(code), value=item_id
+        """
+        code_to_item = {}
+        for item_id in range(1, len(all_item_code)):  # 跳过 index 0 (padding)
+            code = tuple(all_item_code[item_id].tolist())
+            # 如果有冲突，保留第一个（或可以改成 list 存多个）
+            if code not in code_to_item:
+                code_to_item[code] = item_id
+        return code_to_item
+
     def log(self, message, level='info'):
         return log(message, self.accelerator, self.logger, level=level)
