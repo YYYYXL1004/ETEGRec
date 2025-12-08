@@ -214,13 +214,18 @@ class GRPOTrainer(Trainer):
         # 1. 将 codes 转为 item IDs
         gen_item_ids = self.codes_to_items(gen_codes)  # [B, G]
         
-        # 2. Rule Reward: hit = 1, miss = 基于语义相似度的平滑奖励, OOV = -0.1
+        # 2. Rule Reward: hit = 1, miss = 0, OOV = -0.1
         rule_reward = torch.zeros(B, G, device=self.device)
-        hit_mask = (gen_item_ids == targets.unsqueeze(1))  # [B, G]
-        oov_mask = (gen_item_ids == -1)
-        rule_reward[hit_mask] = 1.0
-        rule_reward[oov_mask] = -0.1
-        # miss 的部分先保持 0，后面用 soft_reward 补充
+        for b in range(B):
+            target_id = targets[b].item()
+            for g in range(G):
+                gen_id = gen_item_ids[b, g].item()
+                if gen_id == target_id:
+                    rule_reward[b, g] = 1.0
+                elif gen_id == -1:  # OOV
+                    rule_reward[b, g] = -0.1
+                else:
+                    rule_reward[b, g] = 0.0
         
         # 3. Soft Reward: Semantic Similarity
         soft_reward = torch.zeros(B, G, device=self.device)
@@ -234,20 +239,18 @@ class GRPOTrainer(Trainer):
         target_embs = semantic_emb(targets)  # [B, emb_dim]
         target_embs = F.normalize(target_embs, dim=-1)
         
-        # 向量化计算 soft_reward
-        valid_mask = (gen_item_ids > 0)  # [B, G]
-        gen_item_ids_safe = gen_item_ids.clone()
-        gen_item_ids_safe[~valid_mask] = 0  # 避免 -1 索引
+        for b in range(B):
+            for g in range(G):
+                gen_id = gen_item_ids[b, g].item()
+                if gen_id > 0:  # 有效 item
+                    gen_emb = semantic_emb(torch.tensor([gen_id], device=self.device))
+                    gen_emb = F.normalize(gen_emb, dim=-1)
+                    sim = F.cosine_similarity(gen_emb, target_embs[b:b+1], dim=-1)
+                    soft_reward[b, g] = sim.item()
+                else:  # OOV
+                    soft_reward[b, g] = 0.0
         
-        gen_embs = semantic_emb(gen_item_ids_safe.view(-1)).view(B, G, -1)  # [B, G, emb_dim]
-        gen_embs = F.normalize(gen_embs, dim=-1)
-        
-        # [B, G, emb_dim] @ [B, emb_dim, 1] -> [B, G, 1]
-        sim = torch.bmm(gen_embs, target_embs.unsqueeze(-1)).squeeze(-1)  # [B, G]
-        soft_reward = sim * valid_mask.float()  # 无效位置置 0
-        
-        # 4. 合并奖励：hit 用 rule_reward，miss 用 soft_reward 作为平滑信号
-        # 公式: r = rule + alpha * soft (hit 时 soft 也有贡献)
+        # 4. 合并奖励
         rewards = rule_reward + self.reward_alpha * soft_reward
         
         return rewards
