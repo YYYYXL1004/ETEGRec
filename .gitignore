@@ -17,5 +17,7 @@ docs/
 
 wandb/
 RQVAE/wandb/
-
+new.py
 models
+tools
+analysis_results

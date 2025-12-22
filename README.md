@@ -20,6 +20,7 @@ faiss
 tqdm
 scikit-learn
 transformers
+colorama
 ```
 
 ## Dataset
