@@ -84,7 +84,8 @@ def read_pkl(filename):
         return pickle.load(f)
 
 def safe_load(model, file, verbose=True):
-    state_dict = torch.load(file, map_location=lambda storage, loc: storage)
+    # PyTorch 2.6兼容性：显式设置weights_only=False以加载完整模型
+    state_dict = torch.load(file, map_location=lambda storage, loc: storage, weights_only=False)
     model_state_dict_keys = list(model.state_dict().keys())
     new_state_dict_keys = list(state_dict.keys())
     new_keys_in_new = [k for k in new_state_dict_keys if k not in model_state_dict_keys]
@@ -96,7 +97,8 @@ def safe_load(model, file, verbose=True):
 
 
 def safe_load_embedding(model, file, verbose=True):
-    state_dict = torch.load(file, map_location=lambda storage, loc: storage)
+    # PyTorch 2.6兼容性：显式设置weights_only=False以加载完整模型
+    state_dict = torch.load(file, map_location=lambda storage, loc: storage, weights_only=False)
     model_state_dict_keys = list(model.state_dict().keys())
     new_state_dict_keys = list(state_dict.keys())
     new_keys_in_new = [k for k in new_state_dict_keys if k not in model_state_dict_keys]
@@ -303,6 +305,17 @@ def init_seed(seed, reproducibility):
     if reproducibility:
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
+        # 禁用TF32以保证跨硬件的数值精度一致性（5090->4090迁移）
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        # 禁用PyTorch 2.x的Flash Attention内核，强制使用确定性的Math Attention
+        # 这消除了不同GPU架构下Attention计算实现的微小差异
+        if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
+            torch.backends.cuda.enable_flash_sdp(False)
+        if hasattr(torch.backends.cuda, 'enable_mem_efficient_sdp'):
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+        if hasattr(torch.backends.cuda, 'enable_math_sdp'):
+            torch.backends.cuda.enable_math_sdp(True)
     else:
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
