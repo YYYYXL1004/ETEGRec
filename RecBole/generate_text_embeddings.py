@@ -10,19 +10,30 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 import os
 import torch
+# ================= 5090 迁移专用补丁 (完整版) =================
+# 1. 强制关闭 TF32，防止精度损失 (最重要)
+torch.backends.cuda.matmul.allow_tf32 = False 
+torch.backends.cudnn.allow_tf32 = False
+
+# 2. 开启全局确定性算法，防止并行计算带来的随机误差
+# warn_only=True 表示如果某个算子没有确定性实现，只报错警告但不中断程序
+torch.use_deterministic_algorithms(True, warn_only=True)
+# 3. 设置环境变量，强制 CUDA 算子确定性 (可选，加上更稳)
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 from transformers import AutoTokenizer, AutoModel
 
 # 设置 HF 镜像（如果需要）
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 # ========== 配置参数 ==========
-DATASET_NAME = "Instrument2018"
+DATASET_NAME = "Instrument2018_5090"
 DATASET_DIR = f"./dataset/{DATASET_NAME}"
 META_FILE = f"{DATASET_DIR}/meta_Musical_Instruments.json"
 ITEM2ID_FILE = f"{DATASET_DIR}/{DATASET_NAME}.emb_map.json"
 
 # 模型类型选择: "sentence-transformer" 或 "qwen"
-MODEL_TYPE = "qwen"  # 默认使用 sentence-transformer
+MODEL_TYPE = "sentence-transformer"  # 默认使用 sentence-transformer
 # MODEL_TYPE = "qwen"  # 使用 Qwen-7B
 
 # 模型配置
@@ -68,6 +79,8 @@ print(f"=" * 80)
 print(f"生成 {DATASET_NAME} 数据集的文本语义嵌入")
 print(f"模型类型: {MODEL_TYPE}")
 print(f"模型: {MODEL_NAME}")
+print(f"输出文件: {OUTPUT_FILE}")
+print(f"注意: 此文件将用于5090硬件环境的模型训练")
 if MODEL_TYPE == "qwen" and USE_DIMENSION_REDUCTION:
     print(f"目标嵌入维度: {EMBEDDING_DIM} (将自动降维)")
 else:

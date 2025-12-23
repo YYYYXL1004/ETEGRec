@@ -21,6 +21,29 @@ import os
 import json
 import numpy as np
 import pandas as pd
+import torch
+# ================= 5090 迁移专用补丁 (完整版) =================
+# 1. 强制关闭 TF32，防止精度损失 (最重要)
+torch.backends.cuda.matmul.allow_tf32 = False 
+torch.backends.cudnn.allow_tf32 = False
+
+# 2. 开启全局确定性算法，防止并行计算带来的随机误差
+# warn_only=True 表示如果某个算子没有确定性实现，只报错警告但不中断程序
+torch.use_deterministic_algorithms(True, warn_only=True)
+# 3. 设置环境变量，强制 CUDA 算子确定性 (可选，加上更稳)
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+from recbole.utils import init_seed
+
+# Fix for PyTorch 2.6+ where weights_only=True is default
+# RecBole trainer uses torch.load which fails with weights_only=True for some checkpoints
+_original_torch_load = torch.load
+def _safe_torch_load(*args, **kwargs):
+    # If weights_only is not specified, default it to False
+    if 'weights_only' not in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = _safe_torch_load
+
 from recbole.config import Config
 from recbole.data import create_dataset, data_preparation
 from recbole.model.sequential_recommender import SASRec
@@ -103,7 +126,8 @@ def train_sasrec(dataset_name, data_path):
         'RATING_FIELD': 'rating',
         'TIME_FIELD': 'timestamp',
         'load_col': {'inter': ['user_id', 'item_id', 'rating', 'timestamp']},
-        
+        'seed': 2020,             # 确保显式定义种子
+        'reproducibility': True,  # 确保显式开启复现模式
         # 评估配置 - RecBole会自动做leave-one-out
         'eval_args': {
             'split': {'LS': 'valid_and_test'},  # 自动划分最后2个交互为valid和test
@@ -115,8 +139,8 @@ def train_sasrec(dataset_name, data_path):
         # 模型参数
         'hidden_size': 256,
         'inner_size': 256,
-        'n_layers': 2,
-        'n_heads': 2,
+        'n_layers': 4,
+        'n_heads': 4,
         'hidden_dropout_prob': 0.5,
         'attn_dropout_prob': 0.5,
         'hidden_act': 'gelu',
@@ -147,6 +171,8 @@ def train_sasrec(dataset_name, data_path):
     
     # 创建数据集和模型
     config = Config(model='SASRec', dataset=dataset_name, config_dict=config_dict)
+    # 【核心修复】手动初始化随机种子！
+    init_seed(config['seed'], config['reproducibility'])
     dataset = create_dataset(config)
     train_data, valid_data, test_data = data_preparation(config, dataset)
     
@@ -221,9 +247,9 @@ def main():
     print("=" * 70)
     
     # 配置
-    BASE_DIR = './dataset/Instrument2018'
-    INTER_FILE = os.path.join(BASE_DIR, 'Instrument2018.inter')
-    DATASET_NAME = 'Instrument2018'
+    BASE_DIR = './dataset/Instrument2018_5090'
+    INTER_FILE = os.path.join(BASE_DIR, 'Instrument2018_5090.inter')
+    DATASET_NAME = 'Instrument2018_5090'
     
     if not os.path.exists(INTER_FILE):
         print(f"❌ 文件不存在: {INTER_FILE}")
@@ -234,12 +260,12 @@ def main():
     df_train, df_valid, df_test = load_and_split_data(INTER_FILE)
     
     # 步骤2: 保存合并的.inter文件 (供RecBole使用)
-    recbole_dir = './dataset/Instrument2018/Instrument2018_recbole'
-    recbole_dataset_name = 'Instrument2018_recbole'
+    recbole_dir = './dataset/Instrument2018_5090/Instrument2018_5090_recbole'
+    recbole_dataset_name = 'Instrument2018_5090_recbole'
     save_recbole_inter_file(df_train, df_valid, df_test, recbole_dir, recbole_dataset_name)
     
     # 步骤3: 训练SASRec (使用valid做早停，test做最终评估)
-    model, dataset, test_result = train_sasrec(recbole_dataset_name, './dataset/Instrument2018/')
+    model, dataset, test_result = train_sasrec(recbole_dataset_name, './dataset/Instrument2018_5090/')
     
     # 步骤4: 提取并保存嵌入 (保存到原始数据目录)
     npy_path, map_path = extract_embeddings(model, dataset, BASE_DIR, DATASET_NAME)

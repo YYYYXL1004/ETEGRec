@@ -169,9 +169,9 @@ def main():
     print("=" * 70)
     
     # 配置
-    BASE_DIR = './dataset/Instrument2018'
+    BASE_DIR = './dataset/Instrument2018_5090'
     REVIEW_FILE = os.path.join(BASE_DIR, 'Musical_Instruments.json')
-    DATASET_NAME = 'Instrument2018'
+    DATASET_NAME = 'Instrument2018_5090'
     MIN_INTERACTIONS = 5
     MAX_SEQ_LENGTH = 50
     

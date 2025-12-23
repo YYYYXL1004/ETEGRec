@@ -2,6 +2,17 @@ import yaml
 import argparse
 import warnings
 import torch
+# ================= 5090 迁移专用补丁 (完整版) =================
+# 1. 强制关闭 TF32，防止精度损失 (最重要)
+torch.backends.cuda.matmul.allow_tf32 = False 
+torch.backends.cudnn.allow_tf32 = False
+
+# 2. 开启全局确定性算法，防止并行计算带来的随机误差
+# warn_only=True 表示如果某个算子没有确定性实现，只报错警告但不中断程序
+torch.use_deterministic_algorithms(True, warn_only=True)
+# 3. 设置环境变量，强制 CUDA 算子确定性 (可选，加上更稳)
+import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 from data import load_split_data
 from data import SequentialSplitDataset, Collator
 from torch.utils.data import DataLoader

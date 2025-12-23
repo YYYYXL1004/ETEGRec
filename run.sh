@@ -1,4 +1,4 @@
-DATASET=Instrument2018
+DATASET=Instrument2018_5090
 
 
 accelerate launch --config_file accelerate_config_ddp.yaml main.py \
