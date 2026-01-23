@@ -8,3 +8,5 @@ transformers
 colorama 
 matplotlib
 recbole
+peft
+bitsandbytes
