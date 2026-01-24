@@ -1,5 +1,7 @@
 # ETEGRec
 
+**[English README](./README.md)**
+
 这是论文的官方 PyTorch 实现：
 
 > [Generative Recommender with End-to-End Learnable Item Tokenization](https://doi.org/10.1145/3726302.3729989)

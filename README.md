@@ -1,5 +1,7 @@
 # ETEGRec
 
+**[中文文档 (Chinese README)](./README_CN.md)**
+
 This is the official PyTorch implementation for the paper:
 
 > [Generative Recommender with End-to-End Learnable Item Tokenization](https://doi.org/10.1145/3726302.3729989)
@@ -116,7 +118,7 @@ python generate_text_embeddings.py
 **Key parameters to modify** (in `generate_text_embeddings.py`):
 ```python
 DATASET_NAME = 'Instrument2018_5090'
-MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'  # Or other models
+MODEL_NAME = "sentence-transformers/sentence-t5-base"  # Or other models
 ```
 
 ### Step 3: Pretrain RQVAE (Item Tokenizer)
