@@ -1,24 +1,45 @@
 # .gitignore
 
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Training outputs
 logs/*
 myckpt/*
-dataset/*
-!dataset/data_preprocess.py
-__pycache__/
-
-RQVAE/__pycache__
-RecBole/dataset
-RecBole/log
-RecBole/log_tensorboard
-RecBole/saved
-docs/
-*.pth
-*.pyc
-
 wandb/
 RQVAE/wandb/
+
+# Datasets
+dataset/*
+
+# Models
+models/
+*.pth
+*.ckpt
+*.safetensors
+
+# RecBole
+RecBole/dataset/
+RecBole/log/
+RecBole/log_tensorboard/
+RecBole/saved/
+
+# External repos
+SASRec.pytorch/
+
+# Temporary files
 new.py
-models
-tools
-analysis_results
-SASRec.pytorch
+*.tmp
+*.bak
+*.swp
+*~
