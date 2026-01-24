@@ -37,6 +37,8 @@ RecBole/saved/
 # External repos
 SASRec.pytorch/
 
+docs/paper/*.pdf
+
 # Temporary files
 new.py
 *.tmp

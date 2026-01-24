@@ -1,0 +1,1808 @@
+arXiv:2409.05546v3 [cs.IR] 4 Jun 2025
+
+Generative Recommender with End-to-End Learnable
+Item Tokenization
+Enze Liu∗
+
+Bowen Zheng∗
+
+Cheng Ling
+
+Gaoling School of Artificial
+Intelligence
+Renmin University of China
+Beijing, China
+enzeliu@ruc.edu.cn
+
+Gaoling School of Artificial
+Intelligence
+Renmin University of China
+Beijing, China
+bwzheng0324@ruc.edu.cn
+
+Kuaishou Technology
+Beijing, China
+lingcheng@kuaishou.com
+
+Lantao Hu
+
+Han Li
+
+Kuaishou Technology
+Beijing, China
+hulantao@gmail.com
+
+Kuaishou Technology
+Beijing, China
+lihan08@kuaishou.com
+
+Wayne Xin Zhao
+Gaoling School of Artificial
+Intelligence
+Renmin University of China
+Beijing, China
+batmanfly@gmail.com
+
+Abstract
+
+CCS Concepts
+
+Generative recommender systems have gained increasing attention as an innovative approach that directly generates item identifiers for recommendation tasks. Despite their potential, a major challenge is the effective construction of item identifiers that
+align well with recommender systems. Current approaches often treat item tokenization and generative recommendation training as separate processes, which can lead to suboptimal performance. To overcome this issue, we introduce ETEGRec, a novel
+End-To-End Generative Recommender that unifies item tokenization and generative recommendation into a cohesive framework.
+Built on a dual encoder-decoder architecture, ETEGRec consists
+of an item tokenizer and a generative recommender. To enable
+synergistic interaction between these components, we propose
+a recommendation-oriented alignment strategy, which includes
+two key optimization objectives: sequence-item alignment and
+preference-semantic alignment. These objectives tightly couple
+the learning processes of the item tokenizer and the generative
+recommender, fostering mutual enhancement. Additionally, we develop an alternating optimization technique to ensure stable and
+efficient end-to-end training of the entire framework. Extensive experiments demonstrate the superior performance of our approach
+compared to traditional sequential recommendation models and existing generative recommendation baselines. Our code is available
+at https://github.com/RUCAIBox/ETEGRec.
+
+• Information systems → Recommender systems; Collaborative filtering.
+
+∗ Equal contribution.
+
+Corresponding author.
+
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+SIGIR ’25, Padua, Italy
+© 2025 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 979-8-4007-1592-1/2025/07
+https://doi.org/10.1145/3726302.3729989
+
+Keywords
+Generative Recommendation; Item Tokenization
+ACM Reference Format:
+Enze Liu∗ , Bowen Zheng∗ , Cheng Ling, Lantao Hu, Han Li, and Wayne Xin
+Zhao . 2025. Generative Recommender with End-to-End Learnable Item
+Tokenization. In Proceedings of the 48th International ACM SIGIR Conference
+on Research and Development in Information Retrieval (SIGIR ’25), July 13–18,
+2025, Padua, Italy. ACM, New York, NY, USA, 11 pages. https://doi.org/10.
+1145/3726302.3729989
+
+1
+
+Introduction
+
+In recommender systems, it is essential to model the sequential
+patterns of user behaviors, so as to effectively predict the future
+interactions for target users. Such task setting is typically formulated as sequential recommendation [7, 10, 20, 26], which has attracted increasing research attention. Traditional sequential recommenders [7, 10, 22] are often developed based on sequence models
+(e.g., RNN, CNN, and Transformer) and make the predictions in a
+discriminative way, i.e., evaluating the similarity between the observed past sequence and candidate items, then selecting the most
+similar item(s) for recommendation.
+Recently, drawing from the promising potential of generative
+language models [23, 35], several studies have emerged to apply
+the generative paradigm in recommender systems [19, 24, 30, 32].
+Different from discriminative methods, the generative approach
+formulates the sequential recommendation task as a sequence-tosequence problem and autoregressively generates the identifiers of
+target items. Specifically, it generally involves two main aspects,
+namely item tokenization and autoregressive generation, for developing the entire recommendation framework. For item tokenization,
+it basically refers to assigning a list of meaningful IDs for indexing
+or representing an item. Existing efforts include parameter-free
+methods based on the co-occurrence matrix [9, 16], text feature
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+identifier [2, 12, 24], hierarchical clustering [21, 32], and multi-level
+vector quantization (VQ) [13, 17, 19, 30]. Furthermore, several recent
+studies attempt to improve the quality of item identifiers by introducing collaborative signals [30], diversified regularization [30],
+or multi-behavior information [14, 32]. For autoregressive generation, the encoder-decoder architecture (e.g., T5 [18]) is the most
+widely used backbone due to its excellent capabilities in sequence
+modeling and generation. In addition, there are also some studies that aim to improve performance by adjusting the backbone
+architecture [21, 32] or the learning objectives [21].
+Despite these advancements, existing approaches typically consider item tokenization as a pre-processing step for subsequent generative recommendation. This results in a complete decoupling of
+the item tokenization and autoregressive generation during model
+optimization, which likely hinders the potential of generative recommendation due to two major reasons. Firstly, the item tokenizer
+is essentially unaware of the optimization objectives for recommendation or simply not the best match for the recommender. Secondly,
+the generative recommender cannot deeply fuse or further refine
+the prior knowledge implicitly encoded in item representations
+from the item tokenizer. In light of these concerns, we aim to develop an end-to-end generative recommendation framework that
+seamlessly integrates item tokenization and autoregressive generation. To realize this seamless integration of tokenization and
+generation, we highlight two primary challenges: (1) How to integrate the item tokenizer and generative recommender into a unified
+recommendation framework; (2) How to achieve mutual enhancement between the item tokenizer and generative recommender for
+end-to-end optimization.
+To this end, in this paper, we propose ETEGRec, an End-To-End
+Generative Recommender that seamlessly integrates item tokenization and autoregressive generation. Our framework adopts a dual
+encoder-decoder architecture, where the item tokenizer adopts
+Residual Quantization Variational Autoencoder (RQ-VAE), and the
+generative recommender is a Transformer model similar to T5. The
+key novelty of our approach lies in that the item tokenizer can be
+jointly optimized with the generative recommender, which significantly differs from prior studies that use heuristic or pre-learned
+item tokenizers. In order to achieve mutual enhancement between
+these two components, we design two recommendation-oriented
+alignment strategies, which include sequence-item alignment and
+preference-semantic alignment. Specifically, sequence-item alignment requires that the quantized token distributions from the encoder’s sequential states and the collaborative embedding of the
+target item should be similar, and preference-semantic alignment
+employs contrastive learning to align the user preference captured
+by the Transformer decoder with the target item semantics reconstructed by RQ-VAE. Generally, our objective is to seamlessly integrate the tokenizer with the recommender through a well-crafted
+alignment approach, thereby fostering the mutual enhancement
+between the two components. Finally, to ensure stable and effective
+end-to-end learning, we further devise an alternating optimization
+method for joint training.
+In summary, our main contributions are as follows:
+• We propose a novel end-to-end generative recommender that
+achieves mutual enhancement and joint optimization of item tokenization and autoregressive generation.
+
+Enze Liu, et al.
+
+• We design a recommendation-oriented alignment approach
+that mutually enhances the item tokenizer and the generative
+recommender through sequence-item alignment and preferencesemantic alignment.
+• We conduct extensive experiments on three recommendation
+benchmarks, demonstrating the superiority of our proposed framework compared with both traditional sequential recommendation
+models and generative recommendation baselines.
+
+2
+
+Related Work
+
+In this paper, we review the related work in two major aspects.
+Sequential Recommendation. Sequential recommendation aims
+to predict the next item a user may interact with based on the
+user’s historical behavior sequences. Early studies [20] primarily
+adhere to the Markov Chain assumption and focus on estimating
+the transition matrix. With the development of neural networks,
+various model architectures, such as Recurrent Neural Networks
+(RNN) [7, 25], Convolutional Neural Networks (CNN) [26] and
+Graph Neural Networks (GNN) [1, 33], are applied for sequential
+recommendation. Recently, Transformer [29]-based recommendation models [5, 10, 22, 42] have achieved great success for effective
+sequential user modeling. SASRec [10] utilizes Transformer decoder with unidirectional self-attention to capture user preference.
+BERT4Rec [22] proposes to encode the sequence by bidirectional attention and adopts the mask prediction task for training. S3 Rec [42]
+explores using the intrinsic data correlation as supervised signals
+to pre-train the sequential model for better user and item representations. Furthermore, several works [34, 38] exploit the abundant
+textual features of users and items to enrich the user and item representations. In this work, we focus on exploring the generative
+paradigm for sequential recommendation.
+Generative Recommendation. Nowadays, generative recommendation has emerged as a next-generation paradigm for recommendation systems. In such a generative paradigm, the item sequence
+is tokenized into a token sequence and then fed into generative
+models to predict the tokens of the target item autoregressively.
+Generally, the generative paradigm can be considered as two main
+processes, i.e., item tokenization and generative recommendation.
+Existing approaches for item tokenization can be broadly categorized into parameter-free methods [9, 16, 21, 24, 32, 36], and
+deep learning methods based on multi-level vector quantization
+(VQ) [17, 19, 30, 31]. For parameter-free methods, some studies,
+e.g., CID [9] and GPTRec [16], apply matrix factorization to the
+co-occurrence matrix to derive item identifiers. Other works like
+SEATER [21] and EAGER [32] employ clustering of item embeddings to construct identifiers hierarchically. In addition, there are
+also some attempts [2, 6, 12, 24, 36] to use the textual metadata
+attached to items, e.g., titles and descriptions, as identifiers. While
+these non-parametric methods are highly efficient, they often suffer
+from length bias and fail to capture deeper collaborative relationships among items. Deep learning methods based on multi-level VQ
+instead develop more expressive item identifiers with equal length
+via the Deep Neural Networks (DNN). For instance, TIGER [19] uses
+RQ-VAE to learn the codebooks. LETTER [30] proposes to align
+
+Generative Recommender with End-to-End Learnable Item Tokenization
+
+quantized embeddings in RQ-VAE with collaborative embeddings
+to leverage both collaborative and semantic information.
+Reviewing the existing works on generative recommendation,
+we found that most of them treat item tokenization and generative
+recommendation as two independent stages which may not be
+optimal for generative recommendation. In contrast, in this work,
+we achieved integration between item tokenization and generative
+recommendation via a recommendation-oriented alignment for
+superior recommendation performance.
+
+3
+
+Methodology
+
+In this section, we elaborate on ETEGRec, which develops a joint
+optimization framework for item tokenization and generative recommendation. In Section 3.1, we formally define the generative
+recommendation task. Then we present the dual encoder-decoder
+architecture of our framework in Section 3.2, comprising an item tokenizer and a generative recommender. In Section 3.3, we introduce
+the recommendation-oriented alignment including two alignment
+objectives, i.e., sequence-item alignment and preference-semantic
+alignment, to align the two components from two different perspectives. Finally, we describe in detail the alternating optimization
+approach in Section 3.4. An illustration of our proposed framework
+is shown in Fig. 1.
+
+3.1
+
+Problem Formulation
+
+As the task setting, following prior studies [10, 22], we consider a
+typical sequential recommendation scenario. Given the item set I
+and an interaction sequence 𝑆 = [𝑖 1, 𝑖 2, . . . , 𝑖𝑡 ] from a target user 𝑢,
+sequential recommendation aims to predict the next item 𝑖𝑡 +1 ∈ I
+that user 𝑢 is likely to interact with. To approach this task, we take
+the generative paradigm by casting sequential recommendation as
+token sequence generation [19]: each item is indexed or represented
+by a specific ID identifier, and the task aims to generate the ID
+identifier of the future interacted item. As a straightforward approach, we can represent each item with its original item ID (e.g., a
+unique product number or a randomly assigned number). However,
+such an approach cannot effectively share similar semantics among
+different items, while often leads to a large item vocabulary.
+In a more generic way, each item 𝑖 is represented by multiple
+tokens [𝑐 1, . . . , 𝑐 𝐿 ], where 𝐿 denotes the identifier length. In practice, 𝐿 can vary for different items, while we follow RQ-VAE [37]
+to use the same identifier length for all the items, to reduce the
+potential length bias in item prediction [21, 30]. Following the convention in natural language processing [18], we refer to the process
+of mapping an item into multiple tokens as item tokenization. In
+this representation scheme, the input interaction sequence 𝑆 can be
+first tokenized into the token sequence 𝑋 = [𝑐 11, 𝑐 21, . . . , 𝑐 𝑡𝐿−1, 𝑐 𝑡𝐿 ],
+where each item in 𝑆 is represented by its identifier (i.e., 𝐿 tokens)
+and 𝑡 is the original item index in the interaction sequence 𝑆. To
+obtain the item identifiers, previous studies either adopt the heuristic method [3, 9, 12] or employ a pre-learned tokenizer [19, 30] for
+item tokenization. In this work, we consider devising an end-to-end
+approach for learning both the item tokenizer and the recommender
+backbone. The objective of generative recommendation is to first
+derive the token sequence 𝑋 and then generate the corresponding
+identifier of the target item 𝑌 = [𝑐 𝑡1+1, . . . , 𝑐 𝑡𝐿+1 ] at the (𝑡 + 1)-th
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+step. Formally, this task can be formulated into a typical sequenceto-sequence learning problem as follows:
+𝑃 (𝑌 |𝑋 ) =
+
+𝐿
+Ö
+
+𝑃 (𝑐𝑙𝑡 +1 |𝑋, 𝑐 𝑡1+1, .., 𝑐𝑙𝑡 +1 ).
+
+(1)
+
+𝑙=1
+
+3.2
+
+Dual Encoder-Decoder Architecture
+
+Our proposed framework consists of two main components, namely
+the item tokenizer T and generative recommender R, both taking
+the encoder-decoder architecture. The input item-level interaction
+sequence is first mapped into the token sequence by the item tokenizer before being fed into the recommender. Then the generative
+recommender models the token sequence and autoregressively generates the item tokens for recommendation.
+3.2.1 Item Tokenizer. As introduced in Section 3.1, we adopt a 𝐿level hierarchical representation scheme for item tokenization, in
+which each item is indexed by 𝐿 token IDs. By taking a hierarchical
+scheme, we essentially organize the items in a tree-structured way,
+which is particularly suitable for generative tasks. Another merit
+is that the collaborative semantics among items can be shared by
+the same prefix tokens. Based on the above general idea, we next
+introduce the details for instanting the item tokenizer.
+Token Generation as Residual Quantization. We implement the
+item tokenizer as a RQ-VAE, which constructs multi-level tokens
+via residual quantization. For each item 𝑖, the item tokenizer T
+takes as input its contextual or collaborative semantic embedding
+𝒛 ∈ R𝑑𝑠 1 , where 𝑑𝑠 is the dimension of the semantic embedding.
+The output is its quantized tokens at each level, denoted as:
+[𝑐 1, . . . , 𝑐 𝐿 ] = T (𝒛),
+
+(2)
+
+where 𝑐𝑙 denotes the corresponding token of 𝑖 at the 𝑙-th level.
+Specifically, we first encode 𝒛 into a latent representation via a
+multilayer perceptron network (MLP) based encoder:
+𝒓 = Encoder𝑇 (𝒛).
+
+(3)
+
+Then, the latent representation 𝒓 is quantized into serialized codes
+(called tokens) by looking up 𝐿-level codebooks, where 𝐿 is the
+token length of each item. At each level 𝑙 ∈ {1, . . . , 𝐿}, we have a
+𝐾 , 𝒆𝑙 ∈ R𝑑𝑐 , where 𝐾 is the codebook size.
+codebook C𝑙 = {𝒆𝑘𝑙 }𝑘=1
+𝑘
+Subsequently, the residual quantization can be conducted as:
+𝑐𝑙 = arg max 𝑃 (𝑘 |𝒗𝑙 ),
+
+(4)
+
+𝑘
+
+𝒗𝑙 = 𝒗𝑙 −1 − 𝒆𝑐𝑙 𝑙 −1 .
+
+(5)
+
+where 𝑐𝑙 is the 𝑙-th assigned token, 𝒗𝑙 is the residual vector at the
+𝑖-th level, and we set 𝒗 1 = 𝒓. In the above equation, 𝑃 (𝑐𝑙 = 𝑘 |𝒗𝑙 )
+represents the likelihood that the residual is quantized to token
+𝑘, which is measured by the distance between 𝒗𝑙 and different
+codebook vectors. This probability can be formulated as:
+exp(−||𝒗𝑙 − 𝒆𝑘𝑙 || 2 )
+𝑃 (𝑘 |𝒗𝑙 ) = Í𝐾
+.
+𝑙 2
+𝑗=1 exp(−||𝒗𝑙 − 𝒆 𝑗 || )
+
+(6)
+
+1 To obtain the semantic embeddings 𝒛 , we can run conventional recommendation
+
+algorithms (e.g., SASRec) over the interaction data.
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+(a) 𝐿!"#
+4 2 3 1
+
+Target
+
+Enze Liu, et al.
+
+𝐇!
+Token
+Seq.
+
+Encoder
+
+(c) 𝐿$%&
+Sequence-Item
+Alignment
+
+Embedding Table
+2 4 1 3
+
+1 4 3 2
+
+Token Seq.
+
+...
+
+(b) 𝐿$(
+
+Item Tokenizer
+item 2
+item 1
+Item Emb.
+
+...
+
+Target
+Item
+
+𝐳
+
+Decoder
+
+pooling
+
+𝐳!
+
+Generative
+Recommender
+
+𝐇𝑫
+
+4
+"
+
+2
+
+pooling
+RQ
+3
+
+#
+
+(d) 𝐿'$&
+
+1
+
+$
+
+PreferenceSemantic
+Alignment
+
+%
+
+𝑃𝐳 !
+
+𝑃𝐳 !
+
+𝑃𝐳 !
+
+𝑃𝐳 !
+
+KL Div.
+
+KL Div.
+
+KL Div.
+
+KL Div.
+
+2
+
+3
+
+𝑃𝐳#
+
+𝑃𝐳$
+
+4
+
+Encoder
+𝑃𝐳"
+
+1
+
+Decoder
+
+𝐡!
+
+InfoNCE
+
+𝐳"
+
+𝑃𝐳%
+
+Residual Quantization (RQ)
+
+Figure 1: The overall framework of ETEGRec. ETEGRec consists of two main components, the item tokenizer and the generative
+recommender. Sequence-Item Alignment (SIA) and Preference-Semantic Alignment (PSA) achieve their alignment from two
+different perspectives for mutual enhancement.
+Reconstruction Loss. Through the above process, RQ-VAE quantifies the initial semantic embedding into different levels of tokens
+from a coarse-to-fine granularity [19, 37]. After that, we can obtain the item tokens [𝑐 1, . . . , 𝑐 𝐿 ] and the quantized representation
+Í𝐿 𝑙
+𝒓˜ = 𝑙=1
+𝒆𝑐𝑙 ∈ R𝑑𝑐 . Subsequently, 𝒓˜ is fed into a MLP based decoder
+to reconstruct the item semantic embedding:
+𝒛˜ = Decoder𝑇 ( 𝒓˜ ).
+
+(7)
+
+The semantic quantization loss for learning the item tokenizer is
+formulated as follows:
+LSQ = LRECON + LRQ,
+2
+
+˜ ,
+LRECON = ||𝒛 − 𝒛||
+LRQ =
+
+𝐿
+∑︁
+
+|| sg[𝒗𝑙 ] − 𝒆𝑐𝑙 𝑙 || 2 + 𝛽 ||𝒗𝑙 − sg[𝒆𝑐𝑙 𝑙 ]|| 2,
+
+and 𝑌 = [𝑐 𝑡1+1, . . . , 𝑐 𝑡𝐿+1 ] by T . Then the corresponding token embeddings 𝑬 𝑋 ∈ R |𝑋 | ×𝑑ℎ are fed into the generative recommender
+for user preference modeling, where 𝑑ℎ is the hidden size of the
+recommender. Formally, we begin with token sequence encoding:
+𝑯 𝐸 = Encoder𝑅 (𝑬 𝑋 ),
+
+decoding, we add a special start token “[BOS]” at the beginning of
+𝑌 to construct the decoder input 𝑌˜ = [[BOS], 𝑐 𝑡1+1, . . . , 𝑐 𝑡𝐿+1 ]. Then,
+𝑯 𝐸 along with 𝑌˜ are fed into the decoder to extract user preference
+representation:
+
+(8)
+(9)
+(10)
+
+𝑙=1
+
+where sg[·] denotes the stop-gradient operation [27], and 𝛽 is the
+coefficient that balances the optimization between the encoder and
+codebooks, typically set to 0.25. LRECON is the reconstruction loss
+to guarantee that the reconstructed semantic embedding closely
+matches the original embedding, while LRQ is the RQ loss that
+works to minimize the distance between codebook vectors and
+residual vectors.
+3.2.2 Generative Recommender. For the generative recommender,
+we utilize a Transformer-based encoder-decoder architecture similar to T5 [18] for sequential behavior modeling, as it has shown
+effectiveness in generative recommendation studies [3, 9, 19].
+Token-level Seq2Seq Formulation. During training, the itemlevel user interaction sequence 𝑆 and the target item 𝑖𝑡 +1 are first
+tokenized into the token-level sequence 𝑋 = [𝑐 11, 𝑐 21, . . . , 𝑐 𝑡𝐿−1, 𝑐 𝑡𝐿 ]
+
+(11)
+
+where 𝑯 𝐸 ∈ R |𝑋 | ×𝑑ℎ is the encoded sequence representation. For
+
+𝑯 𝐷 = Decoder𝑅 (𝑯 𝐸 , 𝑌˜ ),
+
+(12)
+
+where 𝑯 𝐷 ∈ R (𝐿+1) ×𝑑ℎ is decoder hidden states that imply user
+preferences over the items.
+Recommendation Loss. By performing inner product with the
+vocabulary embedding matrix 𝑬, 𝑯 𝐷 is further employed to predict
+the target item token at each step. Specifically, we optimize the
+negative log-likelihood of target tokens based on the sequence-tosequence paradigm:
+LREC = −
+
+𝐿
+∑︁
+
+log 𝑃 (𝑌 𝑗 |𝑋, 𝑌< 𝑗 ),
+
+(13)
+
+𝑗=1
+
+where 𝑌 𝑗 represents the 𝑗-th token of target tokens, and 𝑌< 𝑗 denotes
+the tokens before 𝑌 𝑗 . In this way, the tokens of a target item will
+be generated autoregressively.
+
+3.3
+
+Recommendation-oriented Alignment
+
+In previous work [16, 19, 21, 30], the item tokenizer and the generative recommender are treated as two separate components: the
+tokenizer is often trained in the preprocessing stage to generate
+
+Generative Recommender with End-to-End Learnable Item Tokenization
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+tokens for each item but is subsequently fixed during recommender
+training. Such an approach neglects the effect of item tokenization
+on the generative recommendation, which cannot adaptively learn
+more suitable tokenizers for the corresponding recommender. To
+address this limitation, an ideal approach is to jointly learn both
+the item tokenizer and the generative recommender for mutual
+enhancement between the two components. For this purpose, we
+devise two new training strategies for aligning the two components,
+namely sequence-item alignment and preference-semantic alignment.
+3.3.1 Sequence-Item Alignment. We first introduce the training
+strategy for sequence-item alignment.
+Alignment Hypothesis. To align the two components, we consider the item tokenizer as an optimizable component when training
+the recommender. We employ it to obtain the corresponding token distributions for the target item based on different inputs (See
+Eq. (6)), and generate supervision signals based on the idea that
+two associated inputs should produce similar token distributions
+via the tokenizer. In this way, we can utilize the derived supervision
+signals to optimize the involved two components. In our approach,
+we adopt an encoder-decoder architecture, and assume that the
+hidden states 𝑯 𝐸 (Eq. (11)) from the encoder should be highly related to the collaborative embedding 𝒛. The former 𝑯 𝐸 encodes the
+entire information of the past interaction sequence, while the latter
+𝒛 captures the characteristics of the target item. When we feed
+both kinds of representations into the tokenizer, they should yield
+similar tokenization results. Thus, we refer to such an association
+relation as sequence-item alignment.
+Alignment Loss. Based on the above alignment hypothesis, we
+next formulate the corresponding loss for joint optimization. Specially, we first linearize the hidden state 𝑯 𝐸 by applying a mean
+pooling operation:
+𝒛 𝐸 = MLP(mean_pool(𝑯 𝐸 )),
+
+(14)
+
+where an additional MLP layer is further applied for semantic space
+transformation. Subsequently, we employ the item tokenizer to
+generate the token distribution for each level (Eq. (6)), and let 𝑃𝒛𝑙
+and 𝑃 𝑙 𝐸 denote the token distributions at the 𝑙-th level for inputs of
+𝒛
+
+𝒛 (collaborative item embedding) and 𝒛 𝐸 (encoder’s sequence state),
+respectively. Our objective is to enforce the two distributions to be
+similar, since the past sequence state should be highly informative
+for predicting the future interaction. Formally, we introduce the
+symmetric Kullback-Leibler divergence loss is as follows:
+LSIA = −
+
+𝐿 
+∑︁
+
+
+
+𝐷𝐾𝐿 𝑃𝒛𝑙 ||𝑃𝒛𝑙 𝐸 ) + 𝐷𝐾𝐿 𝑃𝒛𝑙 𝐸 ||𝑃𝒛𝑙 ) ,
+
+(15)
+
+𝑙=1
+
+where 𝐷𝐾𝐿 (·) is the Kullback-Leibler divergence between two probablity distributions.
+In addition to component fusion, another merit of this alignment
+loss is that it can enhance the representative capacity of the encoder. It has been found that the decoder might bypass the encoder
+(i.e., seldom using the information from the encoder) to fulfill the
+generation task [11], so that the encoder could not be well trained
+in this case. Our alignment loss can alleviate this issue and improve
+the overall sequence representations.
+
+3.3.2 Preference-Semantic Alignment. Next, we introduce the second alignment loss.
+Alignment Hypothesis. Specifically, we aim to leverage the connection between the decoder’s first hidden state 𝒉𝐷 (the first column
+in 𝑯 𝐷 from Eq. (12)) and the reconstructed semantic embedding 𝒛˜
+(Eq. (7)). The former 𝒉𝐷 is learned by modeling the interaction sequence and reflects the sequential user preference, while the latter
+𝒛˜ encodes the collaborative semantics of the target item. Therefore, we refer to such an association relation as preference-semantic
+alignment. Note that different from the recommendation loss, we
+˜ so that it naturally involves the
+use the reconstructed embedding 𝒛,
+tokenizer component in the optimization process.
+Alignment Loss. Next we employ InfoNCE [4] with in-batch
+˜ the
+negatives to align 𝒉𝐷 (also with MLP transformation) and 𝒛,
+preference-semantic alignment loss is defined as follows:
+!
+˜
+˜ 𝒉𝐷 )/𝜏)
+exp (s( 𝒛,
+exp (s(𝒉𝐷 , 𝒛)/𝜏)
+LPSA = − log Í
++ log Í
+,
+𝐷
+ˆ
+˜ 𝒉)/𝜏)
+exp (s( 𝒛,
+𝒛ˆ ∈ B exp (s(𝒉 , 𝒛ˆ )/𝜏)
+ˆ
+𝒉∈ B
+
+(16)
+
+where 𝑠 (·, ·) is the cosine similarity function, 𝜏 is a temperature
+coefficient and B denotes a batch of training instances. This loss
+can also be considered as an additional enhancement of the recommendation loss (Eq. (13)), which uses the tokens of target items.
+By incorporating the reconstructed collaborative embedding, this
+loss involves the tokenizer component during training, which can
+enhance mutual optimization.
+Through the above two alignment strategies, we can effectively
+enhance the association between the two components during model
+optimization and thus can facilitate mutual enhancement by making
+necessary adaptations to each other.
+
+3.4
+
+Alternating Optimization
+
+Based on the dual encoder-decoder architecture and recommendationoriented alignment, a straightforward approach is to jointly optimize the objectives of the item tokenizer and generative recommender as well as the alignment losses. In order to improve the
+training stability, we propose an alternating optimization strategy to
+mutually train the item tokenizer and the generative recommender.
+Item Tokenizer Optimization. The item tokenizer is optimized
+by jointly considering the semantic quantization loss LSQ (Equation (8)), sequence-item alignment loss LSIA (Equation (15)) and
+preference-semantic alignment loss LPSA (Equation (16)), while
+keeping all parameters of the generative recommender fixed. The
+overall loss can be denoted as follows:
+LIT = LSQ + 𝜇LSIA + 𝜆LPSA,
+
+(17)
+
+where 𝜇 and 𝜆 are hyperparameters for the trade-off of the alignment losses.
+Generative Recommender Optimization. As for the generative
+recommender, we optimize it through the generative recommendation loss LREC (Eq. (13)), the above two alignment losses LSIA
+(Eq. (15)) and LPSA (Eq. (16)), while freezing all parameters of the
+item tokenizer. The optimization objective is:
+LGR = LREC + 𝜇LSIA + 𝜆LPSA .
+
+(18)
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+In general, we divide the training process into multiple cycles,
+each consisting of a fixed number of epochs. In the first epoch of
+each cycle, we optimize the item tokenizer based on Eq. (17) to
+improve the quality of item representations by the generative recommender. As for the rest epochs of each cycle, the item tokenizer
+is frozen and item tokens remain fixed during the generative recommender training process. This alternation continues until the item
+tokenizer converges, after which we permanently freeze it and fully
+train the generative recommender to convergence This approach
+ensures stable optimization when conducting the recommendationoriented alignment.
+
+3.5
+
+Enze Liu, et al.
+
+Table 1: Comparison of ETEGRec with several related studies
+on item Tokenization and generative recommendation. “EL”
+means the length of item identifiers are equal. “IA” denotes
+interaction-aware. “TI” denotes tokenization integration.
+Methods
+GPTRec [16]
+CID [9]
+TIGER [19]
+LETTER [30]
+ETEGRec
+
+Generative Recommendation
+
+EL
+
+IA
+
+Token Sequence
+
+TI
+
+Heuristic
+Heuristic
+Pre-learned
+Pre-learned
+End-to-end
+
+"
+%
+"
+"
+"
+
+"
+%
+%
+%
+"
+
+Pre-processed
+Pre-processed
+Pre-processed
+Pre-processed
+Gradually Refined
+
+%
+%
+%
+%
+"
+
+Table 2: Statistics of the Datasets.
+
+Discussion and Analysis
+
+3.5.1 Comparison with Existing methods. Recently, there have been
+notable advancements in generative recommendation models. To
+highlight the innovations and distinctions of our proposed approach, we conduct a comparative analysis between ETEGRec and
+several typical generative recommendation models from two perspectives: item tokenization and generative recommendation, as
+presented in Table 1.
+Item tokenization in current generative recommendation models can be broadly classified into two categories: heuristic methods
+and pre-learned methods [19, 30]. Heuristic methods, such as GPTRec [16] and CID [9], employ manually constructed user-item
+interaction matrix or item co-occurrence matrix to estimate similarity between items. Although these methods are straightforward and
+efficient, they often fail to capture the profound semantic relevance
+between items. As for pre-learned methods like TIGER and LETTER, they pre-learn a deep neural network as the item tokenizer
+(e.g., autoencoder) to derive identifiers with implicit semantics.
+However, these methods treat item tokenization as a preprocessing step, resulting in a complete decoupling of item tokenizer and
+generative recommender during model optimization. In contrast,
+ETEGRec integrates the tokenizer and recommender into an end-toend framework to address this decoupling problem and achieves
+mutual enhancement between the two components by proposing a
+recommendation-oriented alignment approach. Furthermore, from
+the interaction-aware perspective, only GPTRec introduces interaction awareness through the user-item interaction matrix. Different
+from them, ETEGRec aligns the past user interaction sequence and
+the target item from two different perspectives, thereby incorporating the preference information within user behaviors into the item
+tokenizer.
+Generative recommendation in existing methods typically
+processes user interaction sequences into corresponding token sequences in advance. Such constant data suffer from monotonous
+sequence patterns, which brings the risk of overfitting. In contrast, ETEGRec jointly optimizes the item tokenizer during model
+learning, resulting in diverse token sequences and gradually refined
+semantics. The ablation experiment in Section 4.3 confirmed that
+the continuous enhancement of token sequences significantly contributes to the performance. Moreover, unlike existing methods that
+isolate the item tokenizer in generative recommendation, our approach further integrates and refines the prior knowledge implicit
+in item semantic embeddings from the item tokenizer.
+
+Item Tokenization
+Learning
+
+Dataset
+
+#Users
+
+#Items
+
+#Interactions
+
+Sparsity
+
+Instrument
+Scientific
+Game
+
+57,439
+50,985
+94,762
+
+24,587
+25,848
+25,612
+
+511,836
+412,947
+814,586
+
+99.964%
+99.969%
+99.966%
+
+3.5.2 Complexity Analysis. For item tokenization, considering a
+single item as an example, the time complexity of the encoder
+and decoder layers is O (𝑑 2 ), where 𝑑 is the model dimension. The
+time complexity for codebook lookup operations is O (𝐿𝐾𝑑), where
+𝐾 is the size per codebook and 𝐿 is the codebook number. The
+computation complexity of the semantic quantization loss is O (𝑑 +
+𝐿𝑑). Thus, the total time complexity for tokenizing one item is
+O (𝑑 2 + 𝐿𝐾𝑑). For generative recommendation, the time complexity
+of sequential preference modeling primarily stems from the selfattention and feed-forward layers, which is O (𝑁 2𝑑 +𝑁𝑑 2 ) where 𝑁
+represents the sequence length. The time used by calculating losses
+of REC, SIA and PSA is O (𝐿𝐾𝑑), O (𝐿𝐾𝑑) and O (𝑀𝑑), respectively,
+where 𝑀 is the number of negative samples. Overall, the training
+cost is O (𝑁 𝐿𝐾𝑑 + 𝑁 2𝑑 + 𝑁𝑑 2 + 𝑀𝑑), which is on the same order
+of magnitude as mainstream models (e.g., TIGER and LETTER).
+The inference complexity of our proposed method is completely
+consistent with TIGER, as the item tokenization results can be
+cached in advance.
+
+4
+
+Experiments
+
+In this section, we begin with the detailed experiment setup and
+then present overall performance and in-depth analysis of our proposed approach.
+
+4.1
+
+Experiment Setup
+
+4.1.1 Dataset. We conduct experiments on three subsets of the
+most recent Amazon 2023 review data [8] to evaluate our approach,
+including “Musical Instruments”, “Video Games”, and “Industrial Scientific”. All these datasets comprise user review data from May 1996
+to September 2023. Following previous works [41, 42], we apply
+the 5-core filter to exclude unpopular users and items with less
+than five interaction records. Then, we construct user behavior sequences according to the chronological order and uniformly set the
+maximum item sequence length to 50. The statistics of preprocessed
+datasets are shown in Table 2.
+
+Generative Recommender with End-to-End Learnable Item Tokenization
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+Table 3: The overall performance comparisons between the baselines and ETEGRec. The best and second-best results are
+highlighted in bold and underlined font, respectively. * denotes that the improvements are statistically significant with 𝑝 < 0.01
+in a paired t-test setting.
+Instrument
+Scientific
+Game
+Recall@5 Recall@10 NDCG@5 NDCG@10 Recall@5 Recall@10 NDCG@5 NDCG@10 Recall@5 Recall@10 NDCG@5 NDCG@10
+Caser
+0.0242
+0.0392
+0.0154
+0.0202
+0.0172
+0.0281
+0.0107
+0.0142
+0.0346
+0.0567
+0.0221
+0.0291
+GRU4Rec
+0.0345
+0.0537
+0.0220
+0.0281
+0.0221
+0.0353
+0.0144
+0.0186
+0.0522
+0.0831
+0.0337
+0.0436
+HGN
+0.0319
+0.0515
+0.0202
+0.0265
+0.0220
+0.0356
+0.0138
+0.0182
+0.0423
+0.0694
+0.0266
+0.0353
+SASRec
+0.0341
+0.0530
+0.0217
+0.0277
+0.0256
+0.0406
+0.0147
+0.0195
+0.0517
+0.0821
+0.0329
+0.0426
+BERT4Rec 0.0305
+0.0483
+0.0196
+0.0253
+0.0180
+0.0300
+0.0113
+0.0151
+0.0453
+0.0716
+0.0294
+0.0378
+FMLP-Rec 0.0328
+0.0529
+0.0206
+0.0271
+0.0248
+0.0388
+0.0158
+0.0203
+0.0535
+0.0860
+0.0331
+0.0435
+FDSA
+0.0364
+0.0557
+0.0233
+0.0295
+0.0261
+0.0391
+0.0174
+0.0216
+0.0548
+0.0857
+0.0353
+0.0453
+S3 Rec
+0.0340
+0.0538
+0.0218
+0.0282
+0.0253
+0.0410
+0.0172
+0.0218
+0.0533
+0.0823
+0.0351
+0.0444
+SID
+0.0319
+0.0438
+0.0237
+0.0275
+0.0155
+0.0234
+0.0103
+0.0129
+0.0480
+0.0693
+0.0333
+0.0401
+CID
+0.0352
+0.0507
+0.0234
+0.0285
+0.0192
+0.0300
+0.0123
+0.0158
+0.0497
+0.0748
+0.0343
+0.0424
+TIGER
+0.0368
+0.0574
+0.0242
+0.0308
+0.0275
+0.0431
+0.0181
+0.0231
+0.0570
+0.0895
+0.0370
+0.0471
+TIGER-SAS 0.0375
+0.0576
+0.0242
+0.0306
+0.0272
+0.0435
+0.0174
+0.0227
+0.0561
+0.0891
+0.0363
+0.0469
+LETTER
+0.0372
+0.0581
+0.0243
+0.0310
+0.0276
+0.0433
+0.0179
+0.0230
+0.0576
+0.0901
+0.0373
+0.0475
+ETEGRec 0.0402∗ 0.0624∗ 0.0260∗ 0.0331∗ 0.0294∗ 0.0455∗ 0.0190∗ 0.0241∗ 0.0616∗ 0.0947∗ 0.0400∗ 0.0507∗
+Model
+
+4.1.2 Baseline Models. The baseline models we adopt for comparison include the following two categories: (1) Traditional sequential
+recommendation models: Caser [26] utilizes horizontal and vertical
+convolutional filters to model user behavior sequences. HGN [15]
+employs hierarchical gating networks to capture both long-term
+and short-term user interests from item sequences. GRU4Rec [7]
+is an RNN-based sequential recommender that uses GRU for user
+behavior modeling. BERT4Rec [22] introduces bidirectional Transformer and mask prediction tasks into sequential recommendation
+for user preference modeling. SASRec [10] adopts the unidirectional Transformer to model user behaviors and predict the next
+item. FMLP-Rec [43] proposes an all-MLP sequential recommender
+with learnable filters, which can effectively reduce user behavior
+noise. FDSA [38] emphasizes the transformation patterns between
+item features by separately modeling both item-level and featurelevel sequences using self-attention networks. S3 -Rec [42] incorporates mutual information maximization into sequential recommendation for model pre-training, learning the correlation between
+items and attributes to improve recommendation performance. (2)
+Generative recommendation models: SID [9] sequentially encodes
+item IDs according to user interaction order and utilizes them as
+item identifiers for generative recommendation. CID [9] integrates
+collaborative knowledge into LLM-based generative recommender
+by generating item identifiers through spectral clustering on item
+co-occurrence graphs. TIGER [19] leverages text embedding to
+construct semantic IDs for items and adopts the generative retrieval
+paradigm for sequential recommendation. TIGER-SAS [19] uses
+the item embeddings from trained SASRec instead of text embeddings to construct semantic IDs, which enables item identifiers to
+imply collaborative prior knowledge. LETTER [30] designs a learnable tokenizer by integrating hierarchical semantics, collaborative
+signals, and code assignment diversity.
+4.1.3 Evaluation Settings. To evaluate the performance of various
+methods in sequential recommendation, we employ two widely
+
+used metrics: top-𝐾 Recall and top-𝐾 Normalized Discounted Cumulative Gain (NDCG), where 𝐾 is set to 5, and 10. Following prior
+studies [19, 42], we employ the leave-one-out strategy to split training, validation, and test sets. Specifically, for each user, the latest
+interaction is used as testing data, the second most recent interaction is validation data, and all other interaction records are used
+for training. We conduct the full ranking evaluation over the entire
+item set to avoid bias introduced by sampling. The beam size is
+uniformly set to 20 for all generative recommendation models.
+4.1.4 Semantic ID Generation. We obtain 256-dimensional item
+collaborative semantic embeddings from a trained SASRec [10]. For
+the item tokenizer, we utilize a 3-layer MLP for both the encoder
+and decoder in the RQVAE. The number of codebooks 𝐿 is set to
+3, with each codebook containing 𝐾 = 256 code embeddings of
+dimension 128. To ensure the uniqueness of semantic item IDs,
+following the approach in TIGER [19] we append an additional
+token at the end of the semantic tokens.
+4.1.5 Implementation Details. For our generative recommender,
+we employ T5 with 6 encoder and decoder layers as the backbone.
+The hidden size and the dimension of the feed-forward network
+(FFN) are set to 128 and 512, respectively. Each layer consists of
+4 self-attention heads with a dimension of 64. We utilize a pretrained RQ-VAE to initialize our item tokenizer and employ the
+AdamW optimizer with a weight decay of 0.05 to train the entire
+framework. The number of epochs per cycle 𝐶 is tuned in {2, 4}. The
+training process begins with training the item tokenizer for 1 epoch,
+followed by training the generative recommender for 𝐶-1 epochs.
+This process is repeated until convergence based on validation
+performance. The learning rates for the generative recommender
+and item tokenizer are tuned within the ranges of {5e-3, 3e-3, 1e-3}
+and {5e-4, 1e-4, 5e-5}, respectively. The hyper-parameters 𝜇 and 𝜆
+are tuned within the range {5e-3, 1e-3, 5e-4, 3e-4, 1e-4}.
+Traditional recommendation baselines are implemented by an
+open-source recommendation framework RecBole [39, 40]. For CID,
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+Enze Liu, et al.
+
+Table 4: Ablation study of ETEGRec. We assess the proposed two alignment objectives and the alternating training strategy.
+Instrument
+Scientific
+Game
+Recall@5 Recall@10 NDCG@5 NDCG@10 Recall@5 Recall@10 NDCG@5 NDCG@10 Recall@5 Recall@10 NDCG@5 NDCG@10
+ETEGRec
+0.0402
+0.0624
+0.0260
+0.0331
+0.0294
+0.0455
+0.0190
+0.0241
+0.0616
+0.0947
+0.0400
+0.0507
+w/o LSIA
+0.0396
+0.0614
+0.0255
+0.0325
+0.0285
+0.0446
+0.0186
+0.0238
+0.0590
+0.0917
+0.0386
+0.0491
+w/o LPSA
+0.0389
+0.0609
+0.0250
+0.0321
+0.0270
+0.0422
+0.0174
+0.0223
+0.0602
+0.0933
+0.0392
+0.0499
+w/o LSIA & LPSA 0.0379
+0.0601
+0.0245
+0.0317
+0.0269
+0.0422
+0.0175
+0.0224
+0.0576
+0.0894
+0.0375
+0.0478
+w/o AT
+0.0337
+0.0529
+0.0215
+0.0277
+0.0234
+0.0375
+0.0153
+0.0198
+0.0514
+0.0810
+0.0333
+0.0428
+w/o ETE
+0.0388
+0.0600
+0.0252
+0.0320
+0.0277
+0.0431
+0.0181
+0.0230
+0.0569
+0.0899
+0.0369
+0.0475
+Variants
+
+4.2
+
+Overall Performance
+
+We evaluate ETEGRec on three public recommendation benchmarks. The overall results are presented in Table 3, from which we
+have the following observations:
+• Among traditional sequential recommendation models, FDSA
+exhibits superior performance compared with others across three
+datasets, which is attributed to the utilization of additional textual
+feature embeddings. FMLP-Rec achieves comparable performance
+as SASRec and BERT4Rec which suggests that all-MLP architectures
+can also model the behavior sequence effectively.
+• For generative recommendation models, TIGER and TIGERSAS consistently outperform CID and SID across all three datasets,
+even though CID and SID adopt the pretrained T5 model with
+more parameters. This performance disparity can be attributed to
+their distinct item tokenization methods. Specifically, SID leverages
+numerical tokens to index items, which lack semantic information.
+CID employs a heuristic tokenizer based on the item co-occurrence
+graph to construct item identifiers; however, this approach fails
+to effectively capture the similarity between items. In contrast,
+TIGER and TIGER-SAS learn hierarchical textual or collaborative
+semantics from coarse to fine granularity through RQ-VAE, which
+is more beneficial for recommendation tasks. Notably, TIGER-SAS
+demonstrates comparable performance to TIGER on all datasets,
+indicating that both collaborative and textual semantics contribute
+significantly to recommendation performance. LETTER performs
+best across most cases, as it effectively incorporates collaborative
+and textual semantic information.
+• ETEGRec consistently achieves the best results on all datasets
+compared to the baseline methods, which demonstrates its effectiveness. We attribute the improvements to the mutual enhancement between the item tokenizer and the generative recommender
+through the recommendation-oriented alignment.
+
+4.3
+
+0.075
+0.070
+
+Instrument
+
+0.065
+0.060
+0.055
+0.050
+0.045
+
+Scientific
+
+TIGER
+LETTER
+ETEGRec
+
+Recall@10
+
+0.080
+
+Recall@10
+
+SID [9] and LETTER [30], we utilize their official implementations.
+For TIGER and TIGER-SAS, we follow the implementation details
+provided in the original paper [19]. To ensure fair comparisons, the
+item embedding dimension is set to 128 for all models, except for
+SID and CID, which retain their default dimension of 768.
+
+Seen
+
+Unseen
+
+0.046
+0.044
+0.042
+0.040
+0.038
+0.036
+0.034
+0.032
+0.030
+
+Seen
+
+TIGER
+LETTER
+ETEGRec
+
+Unseen
+
+Figure 2: Performance comparison on seen and unseen users.
+
+all datasets, which indicates that alignment between sequence representation and item representation in the codebook space is beneficial for generative recommendation.
+• w/o LPSA removes the preference-semantic alignment (PSA)
+(Eq. (16)), which also brings a performance degradation. The phenomenon demonstrates the effectiveness of the proposed PSA loss,
+which can enhance user preference modeling.
+• w/o LSIA & LPSA without both LSIA and LPSA . The variant
+lacking both alignments performs worse than removing just one.
+These results show that both sequence-item alignment and preferencesemantic alignment positively contribute to generative recommendation, with their combination leading to improved performance.
+• w/o AT directly jointly learns all involved optimization objectives in our framework. We can find that omitting the alternating
+training strategy from ETEGRec leads to a significant performance
+decline. This result suggests that frequent updates to the item tokenizer during training adversely affect the recommender’s training.
+By employing alternating training, we achieve stable and effective training for both components while maintaining collaborative
+alignment within them.
+• w/o ETE bypasses the end-to-end optimization process and
+instead leverages the final item tokens obtained by our ETEGRec to
+retrain a generative recommender. From the results, it can be seen
+that the improvement of ETEGRec is not only due to superior item
+identifiers but also attributed to the integration of prior knowledge
+encoded in the item tokenizer with the generative recommender.
+
+Ablation Study
+
+In order to evaluate the impact of the proposed techniques in ETEGRec, we conduct an ablation study on all three datasets. The
+performance of the four variants is depicted in Table 4.
+• w/o LSIA without the sequence-item alignment (SIA) (Eq. (15)).
+We can see that this variant performs worse than ETEGRec across
+
+4.4
+
+Further Analysis
+
+4.4.1 Generalizability Evaluation. To assess the generalizability of
+ETEGRec, we evaluate its recommendation performance on new
+users who are unseen during training. We construct a new training
+set by removing the interactions of several users from the training
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+0.034
+
+0.0600
+
+0.033
+
+0.0575
+
+0.032
+0.031
+0.030
+
+0.058
+
+0.0
+
+00
+0.0 1
+00
+0.0 3
+00
+5
+0.0
+01
+0.0
+05
+
+0.0525
+
+Recall@10
+NDCG@10
+
+0.033
+
+0.060
+
+0.032
+
+Recall@10
+NDCG@10
+
+0.031
+
+0.
+0.0 0
+00
+0.0 1
+0
+0.0 03
+0
+0.005
+0
+0.0 1
+05
+
+0.0550
+
+0.034
+
+0.062
+
+NDCG@10
+
+0.0625
+
+NDCG@10
+Recall@10
+
+Recall@10
+
+Generative Recommender with End-to-End Learnable Item Tokenization
+
+(a) Instrument
+
+4.4.3 Hyper-Parameter Analysis. For sequence-item alignment, we
+investigate it by varying the coefficient 𝜇 from 1e-4 to 5e-3. As
+illustrated in Fig. 4, increasing 𝜇 beyond this optimal range could
+interfere with model learning and adversely affect performance.
+The optimal results are achieved with 𝜇 = 3e-4 for the Instrument
+and Scientific dataset, and 𝜇 = 1e-3 for the Game dataset. To explore
+the influence of preference-semantic alignment, we tune 𝜆 within
+the range from 0 to 5e-3 and observe similar trends to those seen
+with 𝜇, as shown in Fig. 4. ETEGRec yields suboptimal performance
+at too large 𝜆 and performs best on all three datasets when 𝜆 = 1e-4.
+
+5
+
+Conclusion
+
+In this paper, we proposed ETEGRec, a novel end-to-end generative recommender with recommendation-oriented alignment. Different from previous methods decoupling item tokenization and
+generative recommendation, ETEGRec seamlessly integrated the
+item tokenizer and the generative recommender to build a fully
+
+0.022
+0.020
+
+0.024
+Recall@10
+NDCG@10
+
+0.022
+0.020
+
+0.0
+
+0.
+0.0 0
+00
+0.0 1
+0
+0.0 03
+0
+0.005
+0
+0.0 1
+05
+
+Recall@10
+NDCG@10
+
+00
+0.0 1
+00
+0.0 3
+00
+5
+0.0
+01
+0.0
+05
+
+0.040
+
+0.026
+NDCG@10
+
+0.024
+
+0.042
+
+NDCG@10
+Recall@10
+
+0.044
+
+0.046
+0.044
+0.042
+0.040
+0.038
+
+(b) Scientific
+
+0.090
+0.088
+
+Recall@10
+NDCG@10
+
+0.094
+0.092
+0.090
+0.088
+
+Recall@10
+NDCG@10
+
+0.052
+0.051
+0.050
+0.049
+0.048
+0.047
+
+NDCG@10
+
+0.092
+
+0.052
+0.051
+0.050
+0.049
+0.048
+0.047
+
+NDCG@10
+Recall@10
+
+0.094
+
+0.
+0.0 0
+00
+0.0 1
+0
+0.0 03
+0
+0.005
+0
+0.0 1
+05
+
+4.4.2 Preference-Semantic Representation Visualization. To further
+validate the effectiveness of our proposed preference-semantic alignment (i.e., Equation (16)), we employ t-SNE [28] to visualize the
+preference representation h𝐷 and semantic representations of the
+˜ as shown in Figure 3. Specifically,
+corresponding target items 𝑧,
+we select 10 items and 80 corresponding interaction histories from
+Instrument and Scientific datasets and extract the preference and
+reconstructed semantic representations. From Figure 3, we observe
+that the preference points are closely clustered around their corresponding target semantic points while being separated from other
+semantic points, demonstrating the effectiveness of our proposed
+PSA in aligning sequential user preference and the target item
+semantics.
+
+0.026
+
+00
+0.0 1
+00
+0.0 3
+00
+5
+0.0
+01
+0.0
+05
+
+set, and obtain a test set containing both seen and unseen users.
+Specifically, we select 5% of users with the least interaction history
+as new users on Instrument and Scientific datasets, and then evaluate the recommendation performance for both seen and unseen
+users. From Fig. 2, it is evident that ETEGRec outperforms LETTER
+and TIGER on both seen and unseen users. This indicates that ETEGRec processes a more robust ability to model users’ preferences
+through the alignment between item tokenizer and generative recommender.
+
+0.046
+
+0.0
+
+Figure 3: Visualization of preference and semantic representations, where circles denote preference points, stars represent semantic points, and different colors indicate distinct
+groups
+
+Recall@10
+
+(b) Scientific
+
+Recall@10
+
+(a) Instrument
+
+(c) Game
+
+Figure 4: Performance comparison of different alignment
+loss coefficients.
+
+end-to-end generative recommendation framework. We further
+designed a recommendation-oriented alignment approach, comprising sequence-item alignment and preference-semantic alignment,
+to achieve mutual enhancement of the two components from two
+different perspectives. To enable effective end-to-end learning, we
+further proposed an alternating optimization strategy for joint
+component learning. Extensive experiments and in-depth analysis
+on three benchmarks have demonstrated the superiority of our
+proposed framework, ETEGRec, compared to both traditional sequential recommendation models and generative recommendation
+baselines. In future work, we will transfer the joint tokenization
+method to other generative recommendation architectures, and also
+explore the scaling effect when increasing the model parameters.
+
+Acknowledgments
+This work was partially supported by National Natural Science
+Foundation of China under Grant No. 92470205 and 62222215, Beijing Municipal Science and Technology Project under Grant No.
+Z231100010323009, and Beijing Natural Science Foundation under
+Grant No. L233008. Xin Zhao is the corresponding author.
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+References
+[1] Jianxin Chang, Chen Gao, Yu Zheng, Yiqun Hui, Yanan Niu, Yang Song, Depeng
+Jin, and Yong Li. 2021. Sequential Recommendation with Graph Neural Networks.
+In SIGIR ’21: The 44th International ACM SIGIR Conference on Research and Development in Information Retrieval, Virtual Event, Canada, July 11-15, 2021, Fernando
+Diaz, Chirag Shah, Torsten Suel, Pablo Castells, Rosie Jones, and Tetsuya Sakai
+(Eds.). ACM, 378–387. doi:10.1145/3404835.3462968
+[2] Dario Di Palma. 2023. Retrieval-augmented Recommender System: Enhancing
+Recommender Systems with Large Language Models. In Proceedings of the 17th
+ACM Conference on Recommender Systems, RecSys 2023, Singapore, Singapore,
+September 18-22, 2023, Jie Zhang, Li Chen, Shlomo Berkovsky, Min Zhang, Tommaso Di Noia, Justin Basilico, Luiz Pizzato, and Yang Song (Eds.). ACM, 1369–1373.
+doi:10.1145/3604915.3608889
+[3] Shijie Geng, Shuchang Liu, Zuohui Fu, Yingqiang Ge, and Yongfeng Zhang. 2022.
+Recommendation as Language Processing (RLP): A Unified Pretrain, Personalized
+Prompt & Predict Paradigm (P5). In RecSys ’22: Sixteenth ACM Conference on
+Recommender Systems, Seattle, WA, USA, September 18 - 23, 2022, Jennifer Golbeck,
+F. Maxwell Harper, Vanessa Murdock, Michael D. Ekstrand, Bracha Shapira,
+Justin Basilico, Keld T. Lundgaard, and Even Oldridge (Eds.). ACM, 299–315.
+doi:10.1145/3523227.3546767
+[4] Michael Gutmann and Aapo Hyvärinen. 2010. Noise-contrastive estimation: A
+new estimation principle for unnormalized statistical models. In Proceedings of the
+Thirteenth International Conference on Artificial Intelligence and Statistics, AISTATS
+2010, Chia Laguna Resort, Sardinia, Italy, May 13-15, 2010 (JMLR Proceedings,
+Vol. 9), Yee Whye Teh and D. Mike Titterington (Eds.). JMLR.org, 297–304. http:
+//proceedings.mlr.press/v9/gutmann10a.html
+[5] Yongjing Hao, Tingting Zhang, Pengpeng Zhao, Yanchi Liu, Victor S. Sheng, Jiajie
+Xu, Guanfeng Liu, and Xiaofang Zhou. 2023. Feature-Level Deeper Self-Attention
+Network With Contrastive Learning for Sequential Recommendation. IEEE Trans.
+Knowl. Data Eng. 35, 10 (2023), 10112–10124. doi:10.1109/TKDE.2023.3250463
+[6] Jesse Harte, Wouter Zorgdrager, Panos Louridas, Asterios Katsifodimos, Dietmar
+Jannach, and Marios Fragkoulis. 2023. Leveraging Large Language Models for
+Sequential Recommendation. In Proceedings of the 17th ACM Conference on Recommender Systems, RecSys 2023, Singapore, Singapore, September 18-22, 2023, Jie
+Zhang, Li Chen, Shlomo Berkovsky, Min Zhang, Tommaso Di Noia, Justin Basilico,
+Luiz Pizzato, and Yang Song (Eds.). ACM, 1096–1102. doi:10.1145/3604915.3610639
+[7] Balázs Hidasi, Alexandros Karatzoglou, Linas Baltrunas, and Domonkos Tikk.
+2016. Session-based Recommendations with Recurrent Neural Networks. In 4th
+International Conference on Learning Representations, ICLR 2016, San Juan, Puerto
+Rico, May 2-4, 2016, Conference Track Proceedings, Yoshua Bengio and Yann LeCun
+(Eds.). http://arxiv.org/abs/1511.06939
+[8] Yupeng Hou, Jiacheng Li, Zhankui He, An Yan, Xiusi Chen, and Julian J. McAuley.
+2024. Bridging Language and Items for Retrieval and Recommendation. CoRR
+abs/2403.03952 (2024). doi:10.48550/ARXIV.2403.03952 arXiv:2403.03952
+[9] Wenyue Hua, Shuyuan Xu, Yingqiang Ge, and Yongfeng Zhang. 2023. How to
+Index Item IDs for Recommendation Foundation Models. In Annual International
+ACM SIGIR Conference on Research and Development in Information Retrieval
+in the Asia Pacific Region, SIGIR-AP 2023, Beijing, China, November 26-28, 2023,
+Qingyao Ai, Yiqin Liu, Alistair Moffat, Xuanjing Huang, Tetsuya Sakai, and Justin
+Zobel (Eds.). ACM, 195–204. doi:10.1145/3624918.3625339
+[10] Wang-Cheng Kang and Julian J. McAuley. 2018. Self-Attentive Sequential Recommendation. In IEEE International Conference on Data Mining, ICDM 2018,
+Singapore, November 17-20, 2018. IEEE Computer Society, 197–206. doi:10.1109/
+ICDM.2018.00035
+[11] Juntao Li, Zecheng Tang, Yuyang Ding, Pinzheng Wang, Pei Guo, Wangjie You,
+Dan Qiao, Wenliang Chen, Guohong Fu, Qiaoming Zhu, Guodong Zhou, and
+Min Zhang. 2023. OpenBA: An Open-sourced 15B Bilingual Asymmetric seq2seq
+Model Pre-trained from Scratch. CoRR abs/2309.10706 (2023). doi:10.48550/
+ARXIV.2309.10706 arXiv:2309.10706
+[12] Jinming Li, Wentao Zhang, Tian Wang, Guanglei Xiong, Alan Lu, and Gerard
+Medioni. 2023. GPT4Rec: A Generative Framework for Personalized Recommendation and User Interests Interpretation. In Proceedings of the 2023 SIGIR
+Workshop on eCommerce co-located with the 46th International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR 2023), Taipei,
+Taiwan, July 27, 2023 (CEUR Workshop Proceedings, Vol. 3589), Surya Kallumadi,
+Yubin Kim, Tracy Holloway King, Shervin Malmasi, Maarten de Rijke, and Jacopo
+Tagliabue (Eds.). CEUR-WS.org. https://ceur-ws.org/Vol-3589/paper_2.pdf
+[13] Han Liu, Yinwei Wei, Xuemeng Song, Weili Guan, Yuan-Fang Li, and Liqiang
+Nie. 2024. MMGRec: Multimodal Generative Recommendation with Transformer Model. CoRR abs/2404.16555 (2024). doi:10.48550/ARXIV.2404.16555
+arXiv:2404.16555
+[14] Zihan Liu, Yupeng Hou, and Julian J. McAuley. 2024. Multi-Behavior Generative
+Recommendation. In Proceedings of the 33rd ACM International Conference on
+Information and Knowledge Management, CIKM 2024, Boise, ID, USA, October
+21-25, 2024, Edoardo Serra and Francesca Spezzano (Eds.). ACM, 1575–1585.
+doi:10.1145/3627673.3679730
+
+Enze Liu, et al.
+
+[15] Chen Ma, Peng Kang, and Xue Liu. 2019. Hierarchical Gating Networks for Sequential Recommendation. In Proceedings of the 25th ACM SIGKDD International
+Conference on Knowledge Discovery & Data Mining, KDD 2019, Anchorage, AK, USA,
+August 4-8, 2019, Ankur Teredesai, Vipin Kumar, Ying Li, Rómer Rosales, Evimaria
+Terzi, and George Karypis (Eds.). ACM, 825–833. doi:10.1145/3292500.3330984
+[16] Aleksandr V. Petrov and Craig Macdonald. 2023. Generative Sequential Recommendation with GPTRec. CoRR abs/2306.11114 (2023). doi:10.48550/ARXIV.2306.
+11114 arXiv:2306.11114
+[17] Haohao Qu, Wenqi Fan, Zihuai Zhao, and Qing Li. 2024. TokenRec: Learning to
+Tokenize ID for LLM-based Generative Recommendation. CoRR abs/2406.10450
+(2024). doi:10.48550/ARXIV.2406.10450 arXiv:2406.10450
+[18] Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang,
+Michael Matena, Yanqi Zhou, Wei Li, and Peter J. Liu. 2020. Exploring the
+Limits of Transfer Learning with a Unified Text-to-Text Transformer. J. Mach.
+Learn. Res. 21 (2020), 140:1–140:67. http://jmlr.org/papers/v21/20-074.html
+[19] Shashank Rajput, Nikhil Mehta, Anima Singh, Raghunandan Hulikal Keshavan, Trung Vu, Lukasz Heldt, Lichan Hong, Yi Tay, Vinh Q. Tran, Jonah
+Samost, Maciej Kula, Ed H. Chi, and Mahesh Sathiamoorthy. 2023. Recommender Systems with Generative Retrieval. In Advances in Neural Information Processing Systems 36: Annual Conference on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 - 16,
+2023, Alice Oh, Tristan Naumann, Amir Globerson, Kate Saenko, Moritz Hardt,
+and Sergey Levine (Eds.). http://papers.nips.cc/paper_files/paper/2023/hash/
+20dcab0f14046a5c6b02b61da9f13229-Abstract-Conference.html
+[20] Steffen Rendle, Christoph Freudenthaler, and Lars Schmidt-Thieme. 2010. Factorizing personalized Markov chains for next-basket recommendation. In Proceedings
+of the 19th International Conference on World Wide Web, WWW 2010, Raleigh,
+North Carolina, USA, April 26-30, 2010, Michael Rappa, Paul Jones, Juliana Freire,
+and Soumen Chakrabarti (Eds.). ACM, 811–820. doi:10.1145/1772690.1772773
+[21] Zihua Si, Zhongxiang Sun, Jiale Chen, Guozhang Chen, Xiaoxue Zang, Kai Zheng,
+Yang Song, Xiao Zhang, Jun Xu, and Kun Gai. 2024. Generative Retrieval with
+Semantic Tree-Structured Identifiers and Contrastive Learning. In Proceedings of
+the 2024 Annual International ACM SIGIR Conference on Research and Development
+in Information Retrieval in the Asia Pacific Region (Tokyo, Japan) (SIGIR-AP 2024).
+Association for Computing Machinery, New York, NY, USA, 154–163. doi:10.
+1145/3673791.3698408
+[22] Fei Sun, Jun Liu, Jian Wu, Changhua Pei, Xiao Lin, Wenwu Ou, and Peng Jiang.
+2019. BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer. In Proceedings of the 28th ACM International Conference on Information and Knowledge Management, CIKM 2019, Beijing, China,
+November 3-7, 2019, Wenwu Zhu, Dacheng Tao, Xueqi Cheng, Peng Cui, Elke A.
+Rundensteiner, David Carmel, Qi He, and Jeffrey Xu Yu (Eds.). ACM, 1441–1450.
+doi:10.1145/3357384.3357895
+[23] Weiwei Sun, Lingyong Yan, Zheng Chen, Shuaiqiang Wang, Haichao Zhu, Pengjie
+Ren, Zhumin Chen, Dawei Yin, Maarten de Rijke, and Zhaochun Ren. 2023.
+Learning to Tokenize for Generative Retrieval. In Advances in Neural Information Processing Systems 36: Annual Conference on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 - 16,
+2023, Alice Oh, Tristan Naumann, Amir Globerson, Kate Saenko, Moritz Hardt,
+and Sergey Levine (Eds.). http://papers.nips.cc/paper_files/paper/2023/hash/
+91228b942a4528cdae031c1b68b127e8-Abstract-Conference.html
+[24] Juntao Tan, Shuyuan Xu, Wenyue Hua, Yingqiang Ge, Zelong Li, and Yongfeng
+Zhang. 2024. IDGenRec: LLM-RecSys Alignment with Textual ID Learning.
+In Proceedings of the 47th International ACM SIGIR Conference on Research and
+Development in Information Retrieval, SIGIR 2024, Washington DC, USA, July 14-18,
+2024, Grace Hui Yang, Hongning Wang, Sam Han, Claudia Hauff, Guido Zuccon,
+and Yi Zhang (Eds.). ACM, 355–364. doi:10.1145/3626772.3657821
+[25] Yong Kiam Tan, Xinxing Xu, and Yong Liu. 2016. Improved Recurrent Neural
+Networks for Session-based Recommendations. In Proceedings of the 1st Workshop
+on Deep Learning for Recommender Systems, DLRS@RecSys 2016, Boston, MA, USA,
+September 15, 2016, Alexandros Karatzoglou, Balázs Hidasi, Domonkos Tikk,
+Oren Sar Shalom, Haggai Roitman, Bracha Shapira, and Lior Rokach (Eds.). ACM,
+17–22. doi:10.1145/2988450.2988452
+[26] Jiaxi Tang and Ke Wang. 2018. Personalized Top-N Sequential Recommendation
+via Convolutional Sequence Embedding. In Proceedings of the Eleventh ACM
+International Conference on Web Search and Data Mining, WSDM 2018, Marina
+Del Rey, CA, USA, February 5-9, 2018, Yi Chang, Chengxiang Zhai, Yan Liu, and
+Yoelle Maarek (Eds.). ACM, 565–573. doi:10.1145/3159652.3159656
+[27] Aäron van den Oord, Oriol Vinyals, and Koray Kavukcuoglu. 2017. Neural
+Discrete Representation Learning. In Advances in Neural Information Processing
+Systems 30: Annual Conference on Neural Information Processing Systems 2017,
+December 4-9, 2017, Long Beach, CA, USA, Isabelle Guyon, Ulrike von Luxburg,
+Samy Bengio, Hanna M. Wallach, Rob Fergus, S. V. N. Vishwanathan, and Roman
+Garnett (Eds.). 6306–6315. https://proceedings.neurips.cc/paper/2017/hash/
+7a98af17e63a0ac09ce2e96d03992fbc-Abstract.html
+[28] Laurens van der Maaten and Geoffrey Hinton. 2008. Visualizing Data using
+t-SNE. Journal of Machine Learning Research 9, 86 (2008), 2579–2605. http:
+//jmlr.org/papers/v9/vandermaaten08a.html
+
+Generative Recommender with End-to-End Learnable Item Tokenization
+
+[29] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones,
+Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. Attention is
+All you Need. In Advances in Neural Information Processing Systems 30: Annual Conference on Neural Information Processing Systems 2017, December 49, 2017, Long Beach, CA, USA, Isabelle Guyon, Ulrike von Luxburg, Samy
+Bengio, Hanna M. Wallach, Rob Fergus, S. V. N. Vishwanathan, and Roman
+Garnett (Eds.). 5998–6008. https://proceedings.neurips.cc/paper/2017/hash/
+3f5ee243547dee91fbd053c1c4a845aa-Abstract.html
+[30] Wenjie Wang, Honghui Bao, Xinyu Lin, Jizhi Zhang, Yongqi Li, Fuli Feng, SeeKiong Ng, and Tat-Seng Chua. 2024. Learnable Item Tokenization for Generative
+Recommendation. In Proceedings of the 33rd ACM International Conference on
+Information and Knowledge Management, CIKM 2024, Boise, ID, USA, October
+21-25, 2024, Edoardo Serra and Francesca Spezzano (Eds.). ACM, 2400–2409.
+doi:10.1145/3627673.3679569
+[31] Yidan Wang, Zhaochun Ren, Weiwei Sun, Jiyuan Yang, Zhixiang Liang, Xin
+Chen, Ruobing Xie, Su Yan, Xu Zhang, Pengjie Ren, Zhumin Chen, and Xin
+Xin. 2024. Enhanced Generative Recommendation via Content and Collaboration Integration. CoRR abs/2403.18480 (2024). doi:10.48550/ARXIV.2403.18480
+arXiv:2403.18480
+[32] Ye Wang, Jiahao Xun, Minjie Hong, Jieming Zhu, Tao Jin, Wang Lin, Haoyuan Li,
+Linjun Li, Yan Xia, Zhou Zhao, and Zhenhua Dong. 2024. EAGER: Two-Stream
+Generative Recommender with Behavior-Semantic Collaboration. In Proceedings
+of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining,
+KDD 2024, Barcelona, Spain, August 25-29, 2024, Ricardo Baeza-Yates and Francesco
+Bonchi (Eds.). ACM, 3245–3254. doi:10.1145/3637528.3671775
+[33] Shu Wu, Yuyuan Tang, Yanqiao Zhu, Liang Wang, Xing Xie, and Tieniu Tan.
+2019. Session-Based Recommendation with Graph Neural Networks. In The
+Thirty-Third AAAI Conference on Artificial Intelligence, AAAI 2019, The ThirtyFirst Innovative Applications of Artificial Intelligence Conference, IAAI 2019, The
+Ninth AAAI Symposium on Educational Advances in Artificial Intelligence, EAAI
+2019, Honolulu, Hawaii, USA, January 27 - February 1, 2019. AAAI Press, 346–353.
+doi:10.1609/AAAI.V33I01.3301346
+[34] Yueqi Xie, Peilin Zhou, and Sunghun Kim. 2022. Decoupled Side Information
+Fusion for Sequential Recommendation. In SIGIR ’22: The 45th International
+ACM SIGIR Conference on Research and Development in Information Retrieval,
+Madrid, Spain, July 11 - 15, 2022, Enrique Amigó, Pablo Castells, Julio Gonzalo,
+Ben Carterette, J. Shane Culpepper, and Gabriella Kazai (Eds.). ACM, 1611–1621.
+doi:10.1145/3477495.3531963
+[35] Tianchi Yang, Minghui Song, Zihan Zhang, Haizhen Huang, Weiwei Deng,
+Feng Sun, and Qi Zhang. 2023. Auto Search Indexer for End-to-End Document Retrieval. In Findings of the Association for Computational Linguistics: EMNLP 2023, Singapore, December 6-10, 2023, Houda Bouamor, Juan Pino,
+and Kalika Bali (Eds.). Association for Computational Linguistics, 6955–6970.
+doi:10.18653/V1/2023.FINDINGS-EMNLP.464
+[36] Zhenrui Yue, Sara Rabhi, Gabriel de Souza Pereira Moreira, Dong Wang, and Even
+Oldridge. 2023. LlamaRec: Two-Stage Recommendation using Large Language
+
+SIGIR ’25, July 13–18, 2025, Padua, Italy
+
+Models for Ranking. CoRR abs/2311.02089 (2023). doi:10.48550/ARXIV.2311.02089
+arXiv:2311.02089
+[37] Neil Zeghidour, Alejandro Luebs, Ahmed Omran, Jan Skoglund, and Marco
+Tagliasacchi. 2022. SoundStream: An End-to-End Neural Audio Codec. IEEE
+ACM Trans. Audio Speech Lang. Process. 30 (2022), 495–507. doi:10.1109/TASLP.
+2021.3129994
+[38] Tingting Zhang, Pengpeng Zhao, Yanchi Liu, Victor S. Sheng, Jiajie Xu, Deqing Wang, Guanfeng Liu, and Xiaofang Zhou. 2019. Feature-level Deeper
+Self-Attention Network for Sequential Recommendation. In Proceedings of the
+Twenty-Eighth International Joint Conference on Artificial Intelligence, IJCAI
+2019, Macao, China, August 10-16, 2019, Sarit Kraus (Ed.). ijcai.org, 4320–4326.
+doi:10.24963/IJCAI.2019/600
+[39] Wayne Xin Zhao, Yupeng Hou, Xingyu Pan, Chen Yang, Zeyu Zhang, Zihan Lin,
+Jingsen Zhang, Shuqing Bian, Jiakai Tang, Wenqi Sun, Yushuo Chen, Lanling Xu,
+Gaowei Zhang, Zhen Tian, Changxin Tian, Shanlei Mu, Xinyan Fan, Xu Chen, and
+Ji-Rong Wen. 2022. RecBole 2.0: Towards a More Up-to-Date Recommendation
+Library. In Proceedings of the 31st ACM International Conference on Information &
+Knowledge Management, Atlanta, GA, USA, October 17-21, 2022, Mohammad Al
+Hasan and Li Xiong (Eds.). ACM, 4722–4726. doi:10.1145/3511808.3557680
+[40] Wayne Xin Zhao, Shanlei Mu, Yupeng Hou, Zihan Lin, Yushuo Chen, Xingyu
+Pan, Kaiyuan Li, Yujie Lu, Hui Wang, Changxin Tian, Yingqian Min, Zhichao
+Feng, Xinyan Fan, Xu Chen, Pengfei Wang, Wendi Ji, Yaliang Li, Xiaoling Wang,
+and Ji-Rong Wen. 2021. RecBole: Towards a Unified, Comprehensive and Efficient
+Framework for Recommendation Algorithms. In CIKM ’21: The 30th ACM International Conference on Information and Knowledge Management, Virtual Event,
+Queensland, Australia, November 1 - 5, 2021, Gianluca Demartini, Guido Zuccon,
+J. Shane Culpepper, Zi Huang, and Hanghang Tong (Eds.). ACM, 4653–4664.
+doi:10.1145/3459637.3482016
+[41] Bowen Zheng, Yupeng Hou, Hongyu Lu, Yu Chen, Wayne Xin Zhao, Ming Chen,
+and Ji-Rong Wen. 2024. Adapting Large Language Models by Integrating Collaborative Semantics for Recommendation. In 40th IEEE International Conference
+on Data Engineering, ICDE 2024, Utrecht, The Netherlands, May 13-16, 2024. IEEE,
+1435–1448. doi:10.1109/ICDE60146.2024.00118
+[42] Kun Zhou, Hui Wang, Wayne Xin Zhao, Yutao Zhu, Sirui Wang, Fuzheng Zhang,
+Zhongyuan Wang, and Ji-Rong Wen. 2020. S3-Rec: Self-Supervised Learning for
+Sequential Recommendation with Mutual Information Maximization. In CIKM
+’20: The 29th ACM International Conference on Information and Knowledge Management, Virtual Event, Ireland, October 19-23, 2020, Mathieu d’Aquin, Stefan
+Dietze, Claudia Hauff, Edward Curry, and Philippe Cudré-Mauroux (Eds.). ACM,
+1893–1902. doi:10.1145/3340531.3411954
+[43] Kun Zhou, Hui Yu, Wayne Xin Zhao, and Ji-Rong Wen. 2022. Filter-enhanced
+MLP is All You Need for Sequential Recommendation. In WWW ’22: The ACM
+Web Conference 2022, Virtual Event, Lyon, France, April 25 - 29, 2022, Frédérique
+Laforest, Raphaël Troncy, Elena Simperl, Deepak Agarwal, Aristides Gionis, Ivan
+Herman, and Lionel Médini (Eds.). ACM, 2388–2399. doi:10.1145/3485447.3512111
+
+
