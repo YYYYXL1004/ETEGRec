@@ -349,19 +349,3 @@ ETEGRec/
    - Adjust `cycle` parameter
 
 ---
-
-## Citation
-
-If you find this code useful, please cite our paper:
-
-```bibtex
-@inproceedings{etegrec2024,
-  title={Generative Recommender with End-to-End Learnable Item Tokenization},
-  author={Your Name},
-  booktitle={Proceedings of ...},
-  year={2024},
-  doi={10.1145/3726302.3729989}
-}
-```
-
----

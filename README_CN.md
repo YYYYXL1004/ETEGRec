@@ -349,17 +349,3 @@ ETEGRec/
    - 调整 `cycle` 参数
 
 ---
-
-## 引用
-
-如果您觉得这段代码有用，请引用我们的论文：
-
-```bibtex
-@inproceedings{etegrec2024,
-  title={Generative Recommender with End-to-End Learnable Item Tokenization},
-  author={Your Name},
-  booktitle={Proceedings of ...},
-  year={2024},
-  doi={10.1145/3726302.3729989}
-}
-```
