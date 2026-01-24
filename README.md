@@ -363,11 +363,3 @@ If you find this code useful, please cite our paper:
 ```
 
 ---
-
-## License
-
-This project is licensed under the MIT License.
-
-## Contact
-
-For questions or issues, please open an issue on GitHub or contact [your-email@example.com].

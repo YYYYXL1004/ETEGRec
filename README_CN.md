@@ -116,7 +116,7 @@ python generate_text_embeddings.py
 **需要修改的关键参数**（在 `generate_text_embeddings.py` 中）：
 ```python
 DATASET_NAME = 'Instrument2018_5090'
-MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'  # 或其他模型
+MODEL_NAME = "sentence-transformers/sentence-t5-base" # 或其他模型
 ```
 
 ### 步骤 3：预训练 RQVAE（物品标记器）
@@ -361,13 +361,3 @@ ETEGRec/
   doi={10.1145/3726302.3729989}
 }
 ```
-
----
-
-## 许可证
-
-本项目采用 MIT 许可证。
-
-## 联系方式
-
-如有问题或疑问，请在 GitHub 上提交 issue 或联系 [your-email@example.com]。
