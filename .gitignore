@@ -36,6 +36,8 @@ RecBole/saved/
 
 # External repos
 SASRec.pytorch/
+OpenOneRec/
+MiniOneRec/
 
 docs/paper/*.pdf
 
