@@ -594,6 +594,36 @@ class LlamaTrainer:
         all_item_code = self.get_code(epoch_idx=-1, verbose=verbose)
         self.all_item_code = torch.tensor(all_item_code).to(self.device)
         
+        # === 快速评估测试：在训练前检测 OOM ===
+        if verbose:
+            self.log("[Pre-check] 测试评估是否会 OOM...")
+        try:
+            self.model_rec.eval()
+            with torch.no_grad():
+                # 取 valid_data 的第一个 batch 测试
+                test_batch = next(iter(self.valid_data))
+                input_ids = test_batch['input_ids'].to(self.device)
+                attention_mask = test_batch['attention_mask'].to(self.device)
+                if dist.is_initialized():
+                    _ = self.model_rec.module.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        num_return_sequences=10
+                    )
+                else:
+                    _ = self.model_rec.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        num_return_sequences=10
+                    )
+            # 清理显存
+            torch.cuda.empty_cache()
+            if verbose:
+                self.log("[Pre-check] 评估测试通过，显存充足！")
+        except torch.cuda.OutOfMemoryError:
+            self.log("[Pre-check] ❌ 评估 OOM！请降低 eval_batch_size 或 num_beams")
+            raise RuntimeError("评估阶段显存不足，请调整参数后重试")
+        
         for epoch_idx in range(self.epochs):
             # 判断当前 epoch 是训练 ID 还是 REC
             is_id_epoch = (epoch_idx % self.cycle == 0)
@@ -642,8 +672,9 @@ class LlamaTrainer:
             self.log(f"[Epoch {epoch_idx}] time: {training_end_time - training_start_time:.2f}s, loss: {train_loss}")
             self.log(f"[Epoch {epoch_idx}] REC lr: {self.rec_lr_scheduler.get_last_lr()} ID lr: {self.id_lr_scheduler.get_last_lr()}")
             
-            # 评估
+            # 评估 (先清理显存，避免训练残留导致 OOM)
             if (epoch_idx + 1) % self.eval_step == 0:
+                torch.cuda.empty_cache()
                 metrics = self._test_epoch(test_data=self.valid_data, verbose=verbose)
                 
                 if metrics[self.valid_metric] > self.best_score:

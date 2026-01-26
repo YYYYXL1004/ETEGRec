@@ -54,6 +54,8 @@ accelerate launch --config_file accelerate_config_llama.yaml main_llama.py \
     --eval_step=2 \
     --batch_size=16 \
     --gradient_accumulation_steps=1 \
+    --eval_batch_size=1 \
+    --num_beams=20 \
     --rec_kl_loss=0.0001 \
     --rec_dec_cl_loss=0.0003 \
     --id_kl_loss=0.0001 \

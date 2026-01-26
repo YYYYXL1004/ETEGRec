@@ -226,9 +226,9 @@ class LlamaRecModel(nn.Module):
         if self.training:
             inputs_embeds = inputs_embeds.requires_grad_(True)
         
-        # === 2. LLaMA Forward ===
+        # === 2. LLaMA Forward (确保输入是 bf16) ===
         outputs = self.llama(
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=inputs_embeds.to(torch.bfloat16),
             attention_mask=attention_mask,
             output_hidden_states=True,
             return_dict=True
@@ -282,7 +282,9 @@ class LlamaRecModel(nn.Module):
     def generate(self, input_ids, attention_mask, num_return_sequences=10):
         """
         自回归生成目标 item 的 codes
-        使用 Beam Search，每步用 output_projector + Codebook 点积
+        使用 Beam Search + 分批forward，每步用 output_projector + Codebook 点积
+        
+        优化：每步forward都分批处理，避免OOM
         
         Args:
             input_ids: [B, seq_len] - 历史序列的 codes
@@ -296,6 +298,10 @@ class LlamaRecModel(nn.Module):
         device = input_ids.device
         codebooks = self.get_codebooks()
         num_beams = self.num_beams
+        
+        # 分批forward的chunk大小（每次最多forward多少个序列）
+        # 越小越省显存但越慢，可根据显存调整
+        chunk_size = 4
         
         # === Beam Search 初始化 ===
         input_ids_expanded = input_ids.repeat_interleave(num_beams, dim=0)
@@ -311,17 +317,36 @@ class LlamaRecModel(nn.Module):
         beam_idx_offset = torch.arange(batch_size, device=device).repeat_interleave(num_beams) * num_beams
         
         for code_idx in range(self.code_length):
-            # Forward
-            outputs = self.llama(
-                inputs_embeds=current_embeds,
-                attention_mask=attention_mask_expanded,
-                output_hidden_states=True,
-                return_dict=True
-            )
+            # === 分批forward避免OOM ===
+            total_seqs = current_embeds.size(0)  # B * num_beams
+            all_hidden_states = []
             
-            last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B*beams, 4096]
+            for chunk_start in range(0, total_seqs, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, total_seqs)
+                chunk_embeds = current_embeds[chunk_start:chunk_end]
+                chunk_mask = attention_mask_expanded[chunk_start:chunk_end]
+                
+                outputs = self.llama(
+                    inputs_embeds=chunk_embeds.to(torch.bfloat16),
+                    attention_mask=chunk_mask,
+                    use_cache=False,  # 不用KV Cache，简化逻辑
+                    output_hidden_states=True,
+                    return_dict=True
+                )
+                
+                # 只保留last token的hidden state
+                all_hidden_states.append(outputs.hidden_states[-1][:, -1, :])
+                
+                # 及时释放显存
+                del outputs
+                torch.cuda.empty_cache()
             
-            # 投影 + 点积 Codebook
+            # 合并结果
+            last_hidden = torch.cat(all_hidden_states, dim=0)  # [B*beams, 4096]
+            del all_hidden_states
+            
+            # 投影 + 点积 Codebook (转换 dtype 避免 bf16 vs fp32 不匹配)
+            last_hidden = last_hidden.to(self.output_projector.weight.dtype)
             query_emb = self.output_projector(last_hidden)  # [B*beams, 128]
             if code_idx < self.num_rqvae_layers:
                 codebook_weight = codebooks[code_idx].weight.t()  # [128, 256]
