@@ -27,6 +27,7 @@ from metrics import ndcg_at_k
 from collections import defaultdict
 from logging import getLogger
 import zlib
+import bitsandbytes as bnb  # 8-bit optimizer 节省显存
 
 init(autoreset=True)
 
@@ -96,8 +97,9 @@ class LlamaTrainer:
         # === 优化器 ===
         self.max_steps = self._get_train_steps()
         self.warmup_steps = config["warmup_steps"]
-        self.rec_optimizer = self._build_optimizer(model_rec, self.lr_rec, self.weight_decay)
-        self.id_optimizer = self._build_optimizer(model_id, self.lr_id, self.weight_decay)
+        # LLaMA (model_rec) 使用 8-bit Adam 节省显存，RQ-VAE (model_id) 用普通 Adam
+        self.rec_optimizer = self._build_optimizer(model_rec, self.lr_rec, self.weight_decay, use_8bit=True)
+        self.id_optimizer = self._build_optimizer(model_id, self.lr_id, self.weight_decay, use_8bit=False)
         
         # === 学习率调度器 ===
         self._setup_lr_schedulers()
@@ -115,11 +117,26 @@ class LlamaTrainer:
                 self.train_data, self.valid_data, self.test_data
             )
     
-    def _build_optimizer(self, model, lr, weight_decay):
-        """构建优化器"""
-        params = model.parameters()
+    def _build_optimizer(self, model, lr, weight_decay, use_8bit=False):
+        """
+        构建优化器
         
-        if self.learner.lower() == 'adamw':
+        Args:
+            model: 要优化的模型
+            lr: 学习率
+            weight_decay: 权重衰减
+            use_8bit: 是否使用 8-bit Adam（节省显存，用于大模型）
+        """
+        # 只优化可训练参数，避免为冻结的 7B 参数分配 optimizer state
+        params = [p for p in model.parameters() if p.requires_grad]
+        trainable_count = sum(p.numel() for p in params)
+        self.log(f"优化器参数量: {trainable_count:,} ({trainable_count/1e6:.2f}M)")
+        
+        if use_8bit:
+            # 8-bit AdamW: 显存减半，用于 LLaMA 等大模型
+            optimizer = bnb.optim.AdamW8bit(params, lr=lr, weight_decay=weight_decay)
+            self.log("使用 8-bit AdamW 优化器 (节省显存)")
+        elif self.learner.lower() == 'adamw':
             optimizer = optim.AdamW(params, lr=lr, weight_decay=weight_decay)
         elif self.learner.lower() == "adam":
             optimizer = optim.Adam(params, lr=lr, weight_decay=weight_decay)
@@ -198,6 +215,32 @@ class LlamaTrainer:
         
         return F.cross_entropy(similarities, labels)
     
+    # === Codebook 同步 ===
+    
+    def _sync_codebook_to_model_id(self):
+        """
+        把 model_rec 的 codebook_embeddings 同步到 model_id
+        在 _train_epoch_rec 结束后调用
+        """
+        with torch.no_grad():
+            rec_model = self.model_rec.module if dist.is_initialized() else self.model_rec
+            id_model = self.model_id.module if dist.is_initialized() else self.model_id
+            
+            for i, vq_layer in enumerate(id_model.rq.vq_layers):
+                vq_layer.embedding.weight.data.copy_(rec_model.codebook_embeddings[i].weight.data)
+    
+    def _sync_codebook_to_model_rec(self):
+        """
+        把 model_id 的 codebook 同步到 model_rec
+        在 _train_epoch_id 结束后调用
+        """
+        with torch.no_grad():
+            rec_model = self.model_rec.module if dist.is_initialized() else self.model_rec
+            id_model = self.model_id.module if dist.is_initialized() else self.model_id
+            
+            for i, vq_layer in enumerate(id_model.rq.vq_layers):
+                rec_model.codebook_embeddings[i].weight.data.copy_(vq_layer.embedding.weight.data)
+    
     # === 训练循环 ===
     
     def _train_epoch_rec(self, epoch_idx, loss_w, verbose=True):
@@ -235,7 +278,13 @@ class LlamaTrainer:
                 else:
                     target_semantic_embs = self.model_rec.semantic_embedding(targets)
                 
-                target_recon_embs, _, _, _, target_code_logits = self.model_id(target_semantic_embs)
+                # model_id 在 train_rec 阶段被冻结
+                # 使用 no_grad + 直接访问 module 避免 DDP hooks 问题
+                with torch.no_grad():
+                    if dist.is_initialized():
+                        target_recon_embs, _, _, _, target_code_logits = self.model_id.module(target_semantic_embs)
+                    else:
+                        target_recon_embs, _, _, _, target_code_logits = self.model_id(target_semantic_embs)
                 
                 # 去重优化
                 _, unq_index = np.unique(targets.cpu().numpy(), return_index=True)
@@ -303,6 +352,10 @@ class LlamaTrainer:
             total_loss[k] = round(total_loss[k] / total_num, 4)
         
         self.accelerator.wait_for_everyone()
+        
+        # 同步 codebook: model_rec → model_id
+        self._sync_codebook_to_model_id()
+        
         return total_loss
     
     def _train_epoch_id(self, epoch_idx, loss_w, verbose=True):
@@ -356,13 +409,22 @@ class LlamaTrainer:
                 unq_recon_embs, commit_loss, _, _, _ = self.model_id(unq_semantic_embs)
                 
                 # === Forward (不计算梯度) ===
+                # model_rec 在 train_id 阶段被冻结，直接访问 module 避免 DDP hooks
                 with torch.no_grad():
-                    outputs = self.model_rec(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        seq_end_positions=seq_end_positions,
-                        target_positions=target_positions,
-                    )
+                    if dist.is_initialized():
+                        outputs = self.model_rec.module(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            seq_end_positions=seq_end_positions,
+                            target_positions=target_positions,
+                        )
+                    else:
+                        outputs = self.model_rec(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            seq_end_positions=seq_end_positions,
+                            target_positions=target_positions,
+                        )
                 
                 # === Loss 计算 ===
                 
@@ -424,6 +486,10 @@ class LlamaTrainer:
             total_loss[k] = round(total_loss[k] / total_num, 4)
         
         self.accelerator.wait_for_everyone()
+        
+        # 同步 codebook: model_id → model_rec
+        self._sync_codebook_to_model_rec()
+        
         return total_loss
     
     # === 评估 ===
@@ -512,8 +578,14 @@ class LlamaTrainer:
     
     # === 主训练循环 ===
     
-    def train(self, verbose=True):
-        """主训练循环"""
+    def train(self, verbose=True, skip_id=False):
+        """
+        主训练循环
+        
+        Args:
+            verbose: 是否打印详细日志
+            skip_id: 是否跳过 train_id 阶段（用于调试 train_rec）
+        """
         stop = False
         cur_eval_step = 0
         loss_w = defaultdict(int)
@@ -523,8 +595,19 @@ class LlamaTrainer:
         self.all_item_code = torch.tensor(all_item_code).to(self.device)
         
         for epoch_idx in range(self.epochs):
+            # 判断当前 epoch 是训练 ID 还是 REC
+            is_id_epoch = (epoch_idx % self.cycle == 0)
+            
+            # 如果 skip_id=True，跳过所有 ID epoch
+            if skip_id and is_id_epoch:
+                self.log(f"[Epoch {epoch_idx}] 跳过 Train ID (skip_id=True)")
+                # 仍然需要更新 item code 表
+                all_item_code = self.get_code(epoch_idx=epoch_idx, verbose=verbose)
+                self.all_item_code = torch.tensor(all_item_code).to(self.device)
+                continue
+            
             # 设置 Loss 权重和冻结策略
-            if epoch_idx % self.cycle == 0:
+            if is_id_epoch:
                 # 训练 Tokenizer
                 loss_w['vq_loss'] = self.config['id_vq_loss']
                 loss_w['code_loss'] = self.config['id_code_loss'] if epoch_idx >= self.warm_epoch else 0
@@ -547,7 +630,7 @@ class LlamaTrainer:
             
             # 训练
             training_start_time = time()
-            if epoch_idx % self.cycle == 0:
+            if is_id_epoch:
                 train_loss = self._train_epoch_id(epoch_idx, loss_w=loss_w, verbose=verbose)
                 all_item_code = self.get_code(epoch_idx=epoch_idx, verbose=verbose)
                 self.all_item_code = torch.tensor(all_item_code).to(self.device)

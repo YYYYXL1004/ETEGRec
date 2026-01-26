@@ -12,6 +12,11 @@ data_path: ./RecBole/dataset
 map_path: .emb_map.json
 semantic_emb_path: Instrument2018_5090_emb_256.npy
 
+# DualSCID: collab + text embedding 拼接 (256 + 768 = 1024)
+collab_emb_path: Instrument2018_5090_emb_256.npy
+text_emb_path: Instrument2018_5090_sentence-transformer_text_768.npy
+normalize: false
+
 # === LLaMA 模型配置 ===
 llama_path: models/Llama-2-7b-hf
 precision: bf16
@@ -23,9 +28,9 @@ lora_alpha: 128
 lora_dropout: 0.05
 
 # === 推荐模型配置 ===
-semantic_hidden_size: 256
+semantic_hidden_size: 1024  # DualSCID checkpoint 使用 1024
 code_num: 256
-code_length: 4
+code_length: 4  # RQ-VAE 3层 + 1层 suffix (处理冲突)
 e_dim: 128
 num_beams: 20
 

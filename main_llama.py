@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from trainer_llama import LlamaTrainer
 from model_llama import LlamaRecModel
 from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
 from utils import (
     init_seed, init_logger, init_device, log, get_local_time,
     get_file_name, convert_config_dict, safe_load, parse_command_line_args
@@ -38,11 +39,12 @@ warnings.filterwarnings("ignore")
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default="./config/llama_instrument2018.yaml")
+    parser.add_argument('--skip_id', action='store_true', help='跳过 train_id 阶段，只运行 train_rec（用于调试）')
     args, unknown_args = parser.parse_known_args()
     return args, unknown_args
 
 
-def train(config, verbose=True, rank=0):
+def train(config, verbose=True, rank=0, skip_id=False):
     """主训练函数"""
     init_seed(config['seed'], config['reproducibility'])
     init_logger(config)
@@ -99,6 +101,10 @@ def train(config, verbose=True, rank=0):
         semantic_emb_path = os.path.join(dataset_path, config["semantic_emb_path"])
         semantic_emb = np.load(semantic_emb_path)
     
+    # 注意: num_items = len(item2id) 包含 PAD (索引0)
+    # semantic_emb 长度 = num_items - 1 (不含 PAD)
+    # 这是正确的设计，semantic_embedding[1:] = semantic_emb
+    
     accelerator.wait_for_everyone()
     
     # === 初始化 RQ-VAE ===
@@ -127,11 +133,13 @@ def train(config, verbose=True, rank=0):
     log("Generating initial item codes...", accelerator, logger)
     with torch.no_grad():
         all_item_embs = model_rec.semantic_embedding.weight.data[1:]
-        all_item_prefix = model_id.get_indices(all_item_embs).detach().cpu()
+        all_item_prefix = model_id.get_indices(all_item_embs).detach().cpu()  # [n_items-1, 3]
     
-    # 构建 code 表 (包含 padding 行)
-    all_item_code = torch.full((num_items + 1, code_length), -1, dtype=torch.long)
-    all_item_code[1:] = all_item_prefix
+    # 构建 code 表 (RQ-VAE 3层 + suffix 1层 = 4层)
+    # 初始 suffix 设为 0，后续 trainer.get_code() 会重新计算
+    all_item_code = torch.full((num_items, code_length), -1, dtype=torch.long)
+    all_item_code[1:, :-1] = all_item_prefix  # 前 3 列填 prefix
+    all_item_code[1:, -1] = 0  # 最后一列 suffix 初始为 0
     
     log(f"Item codes shape: {all_item_code.shape}", accelerator, logger)
     
@@ -195,7 +203,7 @@ def train(config, verbose=True, rank=0):
     )
     
     # === 训练 ===
-    best_score = trainer.train(verbose=verbose)
+    best_score = trainer.train(verbose=verbose, skip_id=config.get('skip_id', False))
     
     # === 测试 ===
     test_results = trainer._test_epoch(test_data=trainer.test_data, verbose=verbose)
@@ -223,7 +231,13 @@ if __name__ == "__main__":
     local_time = get_local_time()
     config['device'], config['use_ddp'] = init_device()
     
-    accelerator = Accelerator()
+    # DDP 配置：
+    # - find_unused_parameters: LoRA 场景下部分参数可能不参与 loss
+    # - 注意：不能用 static_graph=True，因为 train_id/train_rec 阶段图结构不同
+    ddp_kwargs = DistributedDataParallelKwargs(
+        find_unused_parameters=True
+    )
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     
     # 同步时间戳
     all_run_local_time = accelerator.gather_for_metrics([local_time])
@@ -234,8 +248,9 @@ if __name__ == "__main__":
     config['save_path'] = f'./myckpt/llama_{dataset}/{ckpt_name}'
     
     config = convert_config_dict(config)
-    config['accelerator'] = Accelerator()
+    config['accelerator'] = Accelerator(kwargs_handlers=[ddp_kwargs])
+    config['skip_id'] = args.skip_id  # 传递 skip_id 参数
     
     # 开始训练
-    train(config, verbose=(local_rank == 0), rank=local_rank)
+    train(config, verbose=(local_rank == 0), rank=local_rank, skip_id=args.skip_id)
 

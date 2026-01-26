@@ -142,7 +142,7 @@ class LlamaRecModel(nn.Module):
     def get_codebooks(self):
         """获取 RQ-VAE 的码本 Embedding 层列表"""
         return self.rqvae.rq.vq_layers
-    
+
     def get_input_embeddings(self, input_ids, attention_mask):
         """
         SoftEmbedding: 按间隔查表，与原 T5 版本逻辑一致
@@ -231,7 +231,7 @@ class LlamaRecModel(nn.Module):
             # Step 2: 与第 i 层 Codebook 做点积 (Weight Tying!)
             # codebook.embedding.weight: [256, 128] → 转置 → [128, 256]
             codebook_weight = codebooks[i].embedding.weight.t()  # [128, 256]
-            
+        
             # Step 3: 计算相似度 logits
             logits = torch.matmul(query_emb, codebook_weight)  # [B, 256]
             code_logits.append(logits)
@@ -462,19 +462,19 @@ def _train_epoch_rec(self, epoch_idx, loss_w, verbose=True):
 # config/llama_5090.yaml
 model:
   base_model: "meta-llama/Llama-2-7b-hf"
-  precision: bf16
-  gradient_checkpointing: true
+precision: bf16
+gradient_checkpointing: true
 
 lora:
   r: 64
-  lora_alpha: 128
+lora_alpha: 128
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
 
 training:
   batch_size_per_gpu: 2
   gradient_accumulation: 8
-  learning_rate: 1e-4
-  epochs: 50
+learning_rate: 1e-4
+epochs: 50
   warmup_steps: 500
 
 data:

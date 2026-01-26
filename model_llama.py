@@ -51,21 +51,37 @@ class LlamaRecModel(nn.Module):
         self.num_beams = config.get('num_beams', 20)
         
         # === 加载 LLaMA 基座 ===
+        # 注意: 多卡训练时不能用 device_map="auto"，由 accelerate 管理设备
         print(f"[LlamaRecModel] 加载 LLaMA 模型: {llama_path}")
         self.llama = AutoModelForCausalLM.from_pretrained(
             llama_path,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
             trust_remote_code=True
         )
         self.hidden_size = self.llama.config.hidden_size  # 4096
         
         # 启用 Gradient Checkpointing (节省显存)
-        self.llama.gradient_checkpointing_enable()
-        print("[LlamaRecModel] Gradient Checkpointing 已启用")
+        # 使用 use_reentrant=False 解决 DDP 兼容性问题
+        # (避免 "parameter marked ready twice" 错误)
+        self.llama.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        print("[LlamaRecModel] Gradient Checkpointing 已启用 (non-reentrant)")
         
-        # === RQ-VAE (码本) ===
-        self.rqvae = rqvae
+        # === Codebook Embeddings (独立副本，避免 DDP 共享参数问题) ===
+        # 从 rqvae 复制权重，model_rec 和 model_id 各持有独立的 codebook
+        # 训练时需要在 trainer 中手动同步
+        num_rqvae_layers = len(rqvae.rq.vq_layers)
+        self.num_rqvae_layers = num_rqvae_layers  # 保存层数 (3)
+        
+        self.codebook_embeddings = nn.ModuleList([
+            nn.Embedding(self.code_num, self.codebook_dim)
+            for _ in range(num_rqvae_layers)
+        ])
+        # 复制权重
+        for i, vq_layer in enumerate(rqvae.rq.vq_layers):
+            self.codebook_embeddings[i].weight.data.copy_(vq_layer.embedding.weight.data)
+        print(f"[LlamaRecModel] 创建了 {num_rqvae_layers} 个独立的 codebook embeddings")
         
         # === Input Projector: Codebook dim → LLaMA dim ===
         self.scid_projector = nn.Linear(self.codebook_dim, self.hidden_size, bias=False)
@@ -78,9 +94,15 @@ class LlamaRecModel(nn.Module):
         self.enc_adapter = MLPLayers([self.hidden_size, self.codebook_dim])  # SIA
         self.dec_adapter = MLPLayers([self.hidden_size, self.semantic_dim])  # PSA
         
-        # === 语义 Embedding (冻结，与原版一致) ===
-        self.semantic_embedding = nn.Embedding(self.n_items + 1, self.semantic_dim)
+        # === 语义 Embedding (冻结，与原版 T5 一致) ===
+        # n_items 已包含 PAD 位置，无需 +1
+        self.semantic_embedding = nn.Embedding(self.n_items, self.semantic_dim)
         self.semantic_embedding.requires_grad_(False)
+        
+        # === Suffix Embedding (用于第 4 层，处理冲突计数) ===
+        # 与原版 T5 一致，suffix 有独立的 embedding 层
+        self.suffix_embedding = nn.Embedding(self.code_num, self.codebook_dim)
+        self.suffix_embedding.requires_grad_(True)
         
         # === LoRA 微调 ===
         lora_config = LoraConfig(
@@ -124,8 +146,8 @@ class LlamaRecModel(nn.Module):
                         torch.nn.init.zeros_(layer.bias)
     
     def get_codebooks(self):
-        """获取 RQ-VAE 的码本 Embedding 层列表"""
-        return self.rqvae.rq.vq_layers
+        """获取码本 Embedding 层列表 (独立副本)"""
+        return self.codebook_embeddings
     
     def get_input_embeddings(self, input_ids, attention_mask):
         """
@@ -155,13 +177,19 @@ class LlamaRecModel(nn.Module):
         input_ids_safe[input_ids == -1] = 0
         
         # 按间隔查表 (Interval Slicing)
+        # 注意: code_length=4 包含 suffix，但实际 codebook 只有 3 层
         codebooks = self.get_codebooks()
+        
         for level in range(self.code_length):
             # 取每隔 code_length 的位置
             codes_at_level = input_ids_safe[:, level::self.code_length]  # [B, seq_len/K]
             
-            # 从对应层的码本查 embedding
-            raw_embeds = codebooks[level].embedding(codes_at_level)  # [B, seq_len/K, 128]
+            if level < self.num_rqvae_layers:
+                # 前 3 层：从对应 codebook embedding 查
+                raw_embeds = codebooks[level](codes_at_level)  # [B, seq_len/K, 128]
+            else:
+                # 第 4 层 (suffix)：用独立的 suffix_embedding
+                raw_embeds = self.suffix_embedding(codes_at_level)  # [B, seq_len/K, 128]
             
             # 投影到 LLaMA 维度
             proj_embeds = self.scid_projector(raw_embeds.to(self.scid_projector.weight.dtype))
@@ -229,9 +257,13 @@ class LlamaRecModel(nn.Module):
             # Step 1: 投影回 Codebook 维度
             query_emb = self.output_projector(hidden_at_pos)  # [B, 128]
             
-            # Step 2: 与第 i 层 Codebook 做点积 (Weight Tying!)
-            # codebook.embedding.weight: [256, 128] → 转置 → [128, 256]
-            codebook_weight = codebooks[i].embedding.weight.t()  # [128, 256]
+            # Step 2: 与对应层的权重做点积
+            if i < self.num_rqvae_layers:
+                # 前 3 层：与 Codebook 做点积 (Weight Tying!)
+                codebook_weight = codebooks[i].weight.t()  # [128, 256]
+            else:
+                # 第 4 层 (suffix)：与 suffix_embedding 做点积
+                codebook_weight = self.suffix_embedding.weight.t()  # [128, 256]
             
             # Step 3: 计算相似度 logits
             logits = torch.matmul(query_emb, codebook_weight.to(query_emb.dtype))  # [B, 256]
@@ -291,7 +323,10 @@ class LlamaRecModel(nn.Module):
             
             # 投影 + 点积 Codebook
             query_emb = self.output_projector(last_hidden)  # [B*beams, 128]
-            codebook_weight = codebooks[code_idx].embedding.weight.t()  # [128, 256]
+            if code_idx < self.num_rqvae_layers:
+                codebook_weight = codebooks[code_idx].weight.t()  # [128, 256]
+            else:
+                codebook_weight = self.suffix_embedding.weight.t()  # [128, 256]
             logits = torch.matmul(query_emb, codebook_weight.to(query_emb.dtype))  # [B*beams, 256]
             
             # Beam Search 更新
@@ -317,7 +352,10 @@ class LlamaRecModel(nn.Module):
             
             # 添加新生成的 code embedding
             next_codes_flat = next_codes.view(-1)
-            next_embeds = codebooks[code_idx].embedding(next_codes_flat)  # [B*beams, 128]
+            if code_idx < self.num_rqvae_layers:
+                next_embeds = codebooks[code_idx](next_codes_flat)  # [B*beams, 128]
+            else:
+                next_embeds = self.suffix_embedding(next_codes_flat)  # [B*beams, 128]
             next_embeds = self.scid_projector(next_embeds.to(self.scid_projector.weight.dtype))
             next_embeds = next_embeds.unsqueeze(1)  # [B*beams, 1, 4096]
             
