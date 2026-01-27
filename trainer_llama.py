@@ -9,6 +9,7 @@ LLaMA 版本的训练器
 """
 
 import os
+import gc
 import torch
 import numpy as np
 import torch.distributed as dist
@@ -104,7 +105,7 @@ class LlamaTrainer:
         # === 学习率调度器 ===
         self._setup_lr_schedulers()
         
-        self.best_score = 0
+        self.best_score = -1  # 初始化为 -1，确保第一次评估一定保存
         self.best_ckpt = None
         
         # === Accelerate 准备 ===
@@ -269,8 +270,11 @@ class LlamaTrainer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 seq_end_positions = batch['seq_end_positions'].to(self.device)
                 target_positions = batch['target_positions'].to(self.device)
-                labels = batch['labels'].to(self.device)
                 targets = batch['targets'].to(self.device)
+                
+                # ⭐ 关键修复：使用当前的 all_item_code 表获取正确的 labels
+                # 数据集中的 labels 是初始化时的 codes，但 codes 会在训练中更新
+                labels = self.all_item_code[targets]  # [B, code_length]
                 
                 # === 获取目标 item 的语义 embedding ===
                 if dist.is_initialized():
@@ -356,10 +360,19 @@ class LlamaTrainer:
         # 同步 codebook: model_rec → model_id
         self._sync_codebook_to_model_id()
         
+        # ⭐ 训练结束后清理显存，为评估腾出空间
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         return total_loss
     
     def _train_epoch_id(self, epoch_idx, loss_w, verbose=True):
         """训练 Tokenizer (冻结 Recommender)"""
+        # ⭐ 开始前强制清理显存（评估后残留可能导致 OOM）
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()  # 确保所有 CUDA 操作完成
+        
         self.model_id.train()
         self.model_rec.eval()
         
@@ -384,7 +397,7 @@ class LlamaTrainer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 seq_end_positions = batch['seq_end_positions'].to(self.device)
                 target_positions = batch['target_positions'].to(self.device)
-                labels = batch['labels'].to(self.device)
+                # labels 在 train_id 中不使用，只用于 train_rec
                 targets = batch['targets'].to(self.device)
                 
                 # === 获取目标 item 的语义 embedding ===
@@ -490,6 +503,10 @@ class LlamaTrainer:
         # 同步 codebook: model_id → model_rec
         self._sync_codebook_to_model_rec()
         
+        # ⭐ 训练结束后清理显存
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         return total_loss
     
     # === 评估 ===
@@ -544,29 +561,121 @@ class LlamaTrainer:
         total = 0
         metrics = {m: 0 for m in self.all_metrics}
         
+        # ⭐ DEBUG: 记录第一个 batch 的详细信息
+        debug_first_batch = True
+        
         for batch in iter_data:
-            input_ids = batch['input_ids'].to(self.device)
+            input_ids = batch['input_ids'].to(self.device)  # [B, total_len] 包含历史+目标
             attention_mask = batch['attention_mask'].to(self.device)
-            labels = batch['labels'].to(self.device)
+            targets = batch['targets'].to(self.device)  # [B] 目标 item IDs
+            seq_end_positions = batch['seq_end_positions'].to(self.device)  # [B]
+            
+            # ⭐ 关键修复：使用当前的 all_item_code 表获取正确的 labels
+            # 数据集中的 labels 是初始化时的 codes，但 codes 会在训练中更新
+            labels = self.all_item_code[targets]  # [B, code_length]
+            
+            # ⭐ 截取历史部分：generate 只需要历史 codes，不需要目标
+            # seq_end_position 是历史最后一个 token 的位置（padding 后的位置）
+            # 由于左 padding，历史部分是 input_ids[:, :seq_end_pos+1]
+            # 但不同样本的 seq_end_pos 不同，需要逐个处理后重新 padding
+            batch_size = input_ids.size(0)
+            
+            # 构造只包含历史的 input_ids
+            history_list = []
+            for i in range(batch_size):
+                end_pos = seq_end_positions[i].item() + 1  # 历史部分长度（包含 padding）
+                history_list.append(input_ids[i, :end_pos])
+            
+            # 重新左 padding
+            max_history_len = max(h.size(0) for h in history_list)
+            history_input_ids = torch.full((batch_size, max_history_len), -1, dtype=torch.long, device=self.device)
+            history_attention_mask = torch.zeros((batch_size, max_history_len), dtype=torch.long, device=self.device)
+            
+            for i, h in enumerate(history_list):
+                pad_len = max_history_len - h.size(0)
+                history_input_ids[i, pad_len:] = h
+                history_attention_mask[i, pad_len:] = 1
+                # 保留原始 padding 部分的 mask
+                history_attention_mask[i, :pad_len] = 0
+                # 原始 padding (-1) 部分也需要正确处理
+                history_attention_mask[i] = (history_input_ids[i] != -1).long()
+            
+            # ⭐ 释放不再需要的变量
+            del history_list, input_ids, attention_mask, seq_end_positions
+            
+            # ⭐ DEBUG: 打印第一个 batch 的详细信息
+            if debug_first_batch and self.accelerator.is_main_process:
+                self.log(f"[DEBUG] history_input_ids shape: {history_input_ids.shape}")
+                # 找到第一个非 padding 的位置
+                first_valid = (history_input_ids[0] != -1).nonzero()
+                if len(first_valid) > 0:
+                    start_idx = first_valid[0].item()
+                    self.log(f"[DEBUG] history_input_ids[0] first valid at idx {start_idx}")
+                    self.log(f"[DEBUG] history_input_ids[0][{start_idx}:{start_idx+20}]: {history_input_ids[0][start_idx:start_idx+20].tolist()}")
+                else:
+                    self.log(f"[DEBUG] ⚠️ history_input_ids[0] is ALL padding!")
+                self.log(f"[DEBUG] history_attention_mask[0] sum: {history_attention_mask[0].sum().item()} (valid tokens)")
+                self.log(f"[DEBUG] targets[0]: {targets[0].item()}")
+                self.log(f"[DEBUG] labels shape: {labels.shape}")
+                self.log(f"[DEBUG] labels[0] (from current code table): {labels[0].tolist()}")
+                old_labels = batch['labels'].to(self.device)
+                self.log(f"[DEBUG] old_labels[0] (from dataset, may be stale): {old_labels[0].tolist()}")
+                if not torch.all(labels[0] == old_labels[0]):
+                    self.log(f"[DEBUG] ⚠️ Labels mismatch! Code table has been updated.")
             
             # 生成预测
             if dist.is_initialized():
                 preds = self.model_rec.module.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
+                    input_ids=history_input_ids,
+                    attention_mask=history_attention_mask,
                     num_return_sequences=10
                 )
+                
+                # ⭐ DEBUG: 打印生成结果
+                if debug_first_batch and self.accelerator.is_main_process:
+                    self.log(f"[DEBUG] preds shape: {preds.shape}")
+                    self.log(f"[DEBUG] preds[0]: {preds[0].tolist()}")
+                    self.log(f"[DEBUG] Expected label[0]: {labels[0].tolist()}")
+                    # 检查是否有任何匹配
+                    for beam_idx in range(min(10, preds.shape[1])):
+                        match = torch.all(preds[0, beam_idx] == labels[0]).item()
+                        self.log(f"[DEBUG] Beam {beam_idx}: {preds[0, beam_idx].tolist()} match={match}")
+                    debug_first_batch = False
+                
+                # ⭐ 释放输入
+                del history_input_ids, history_attention_mask
+                
                 all_preds, all_labels = self.accelerator.gather_for_metrics((preds, labels))
                 _metrics = self.evaluate(all_preds, all_labels)
                 total += len(all_labels)
+                
+                # ⭐ 释放中间结果
+                del preds, all_preds, all_labels
             else:
                 preds = self.model_rec.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
+                    input_ids=history_input_ids,
+                    attention_mask=history_attention_mask,
                     num_return_sequences=10
                 )
+                
+                # ⭐ DEBUG: 打印生成结果 (单卡模式)
+                if debug_first_batch and self.accelerator.is_main_process:
+                    self.log(f"[DEBUG] preds shape: {preds.shape}")
+                    self.log(f"[DEBUG] preds[0]: {preds[0].tolist()}")
+                    self.log(f"[DEBUG] Expected label[0]: {labels[0].tolist()}")
+                    # 检查是否有任何匹配
+                    for beam_idx in range(min(10, preds.shape[1])):
+                        match = torch.all(preds[0, beam_idx] == labels[0]).item()
+                        self.log(f"[DEBUG] Beam {beam_idx}: {preds[0, beam_idx].tolist()} match={match}")
+                    debug_first_batch = False
+                
+                del history_input_ids, history_attention_mask
+                
                 _metrics = self.evaluate(preds, labels)
                 total += len(labels)
+                del preds
+            
+            del labels
             
             for m in metrics:
                 metrics[m] += _metrics[m]
@@ -593,6 +702,9 @@ class LlamaTrainer:
         # 初始化 item code 表
         all_item_code = self.get_code(epoch_idx=-1, verbose=verbose)
         self.all_item_code = torch.tensor(all_item_code).to(self.device)
+        
+        # ⭐ 同步更新数据集中的 all_item_code
+        self._sync_code_table_to_datasets()
         
         # === 快速评估测试：在训练前检测 OOM ===
         if verbose:
@@ -634,6 +746,8 @@ class LlamaTrainer:
                 # 仍然需要更新 item code 表
                 all_item_code = self.get_code(epoch_idx=epoch_idx, verbose=verbose)
                 self.all_item_code = torch.tensor(all_item_code).to(self.device)
+                # ⭐ 同步更新数据集中的 all_item_code
+                self._sync_code_table_to_datasets()
                 continue
             
             # 设置 Loss 权重和冻结策略
@@ -664,6 +778,8 @@ class LlamaTrainer:
                 train_loss = self._train_epoch_id(epoch_idx, loss_w=loss_w, verbose=verbose)
                 all_item_code = self.get_code(epoch_idx=epoch_idx, verbose=verbose)
                 self.all_item_code = torch.tensor(all_item_code).to(self.device)
+                # ⭐ 同步更新数据集中的 all_item_code
+                self._sync_code_table_to_datasets()
             else:
                 train_loss = self._train_epoch_rec(epoch_idx, loss_w=loss_w, verbose=verbose)
             training_end_time = time()
@@ -672,10 +788,18 @@ class LlamaTrainer:
             self.log(f"[Epoch {epoch_idx}] time: {training_end_time - training_start_time:.2f}s, loss: {train_loss}")
             self.log(f"[Epoch {epoch_idx}] REC lr: {self.rec_lr_scheduler.get_last_lr()} ID lr: {self.id_lr_scheduler.get_last_lr()}")
             
-            # 评估 (先清理显存，避免训练残留导致 OOM)
+            # 评估 (前后都清理显存，避免 OOM)
             if (epoch_idx + 1) % self.eval_step == 0:
+                gc.collect()
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                
                 metrics = self._test_epoch(test_data=self.valid_data, verbose=verbose)
+                
+                # ⭐ 评估后强制清理显存，避免下一个 epoch OOM
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
                 
                 if metrics[self.valid_metric] > self.best_score:
                     self.best_score = metrics[self.valid_metric]
@@ -698,6 +822,27 @@ class LlamaTrainer:
         return self.best_score
     
     # === 辅助方法 ===
+    
+    def _sync_code_table_to_datasets(self):
+        """
+        同步 all_item_code 到所有数据集
+        
+        ⭐ 关键修复：FORGE load balancing 更新 code table 后，
+        数据集中的历史序列 codes 也需要同步更新，否则训练和评估会不一致
+        """
+        # accelerate 包装后，需要通过 .dataset 访问原始数据集
+        for dataloader in [self.train_data, self.valid_data, self.test_data]:
+            if dataloader is None:
+                continue
+            # 获取原始数据集
+            if hasattr(dataloader, 'dataset'):
+                dataset = dataloader.dataset
+            else:
+                dataset = dataloader
+            
+            # 更新 all_item_code
+            if hasattr(dataset, 'all_item_code'):
+                dataset.all_item_code = self.all_item_code.cpu()
     
     def _freeze_model(self, model):
         """冻结模型参数"""

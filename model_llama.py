@@ -49,14 +49,17 @@ class LlamaRecModel(nn.Module):
         self.semantic_dim = config['semantic_hidden_size']  # 256
         self.n_items = config['n_items']
         self.num_beams = config.get('num_beams', 20)
+        self.generate_chunk_size = config.get('generate_chunk_size', 4)  # ⭐ 可配置
         
         # === 加载 LLaMA 基座 ===
         # 注意: 多卡训练时不能用 device_map="auto"，由 accelerate 管理设备
+        # 注意: RTX 5090 (Blackwell) 暂不支持 flash_attn，使用 SDPA (PyTorch 原生)
         print(f"[LlamaRecModel] 加载 LLaMA 模型: {llama_path}")
         self.llama = AutoModelForCausalLM.from_pretrained(
             llama_path,
             torch_dtype=torch.bfloat16,
-            trust_remote_code=True
+            trust_remote_code=True,
+            attn_implementation="sdpa"  # PyTorch 2.0 原生 SDPA，比默认实现快
         )
         self.hidden_size = self.llama.config.hidden_size  # 4096
         
@@ -282,9 +285,7 @@ class LlamaRecModel(nn.Module):
     def generate(self, input_ids, attention_mask, num_return_sequences=10):
         """
         自回归生成目标 item 的 codes
-        使用 Beam Search + 分批forward，每步用 output_projector + Codebook 点积
-        
-        优化：每步forward都分批处理，避免OOM
+        使用 Beam Search + 分批 forward，每步用 output_projector + Codebook 点积
         
         Args:
             input_ids: [B, seq_len] - 历史序列的 codes
@@ -299,9 +300,8 @@ class LlamaRecModel(nn.Module):
         codebooks = self.get_codebooks()
         num_beams = self.num_beams
         
-        # 分批forward的chunk大小（每次最多forward多少个序列）
-        # 越小越省显存但越慢，可根据显存调整
-        chunk_size = 4
+        # 分批 forward 的 chunk 大小
+        chunk_size = self.generate_chunk_size
         
         # === Beam Search 初始化 ===
         input_ids_expanded = input_ids.repeat_interleave(num_beams, dim=0)
@@ -317,7 +317,7 @@ class LlamaRecModel(nn.Module):
         beam_idx_offset = torch.arange(batch_size, device=device).repeat_interleave(num_beams) * num_beams
         
         for code_idx in range(self.code_length):
-            # === 分批forward避免OOM ===
+            # === 分批 forward 避免 OOM ===
             total_seqs = current_embeds.size(0)  # B * num_beams
             all_hidden_states = []
             
@@ -329,17 +329,14 @@ class LlamaRecModel(nn.Module):
                 outputs = self.llama(
                     inputs_embeds=chunk_embeds.to(torch.bfloat16),
                     attention_mask=chunk_mask,
-                    use_cache=False,  # 不用KV Cache，简化逻辑
+                    use_cache=False,
                     output_hidden_states=True,
                     return_dict=True
                 )
                 
-                # 只保留last token的hidden state
+                # 只保留 last token 的 hidden state
                 all_hidden_states.append(outputs.hidden_states[-1][:, -1, :])
-                
-                # 及时释放显存
                 del outputs
-                torch.cuda.empty_cache()
             
             # 合并结果
             last_hidden = torch.cat(all_hidden_states, dim=0)  # [B*beams, 4096]
@@ -348,6 +345,7 @@ class LlamaRecModel(nn.Module):
             # 投影 + 点积 Codebook (转换 dtype 避免 bf16 vs fp32 不匹配)
             last_hidden = last_hidden.to(self.output_projector.weight.dtype)
             query_emb = self.output_projector(last_hidden)  # [B*beams, 128]
+            del last_hidden  # ⭐ 释放大张量
             if code_idx < self.num_rqvae_layers:
                 codebook_weight = codebooks[code_idx].weight.t()  # [128, 256]
             else:

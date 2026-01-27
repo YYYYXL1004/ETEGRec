@@ -14,10 +14,14 @@ import os
 import numpy as np
 
 # === 5090 迁移专用补丁 ===
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
-torch.use_deterministic_algorithms(True, warn_only=True)
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+# TF32 设置：启用可加速 ~30%，但会有微小精度损失（通常 <0.1%）
+# 设置为 True 以获得更快的训练速度
+ENABLE_TF32 = True  # ⭐ 改为 True 可加速
+torch.backends.cuda.matmul.allow_tf32 = ENABLE_TF32
+torch.backends.cudnn.allow_tf32 = ENABLE_TF32
+torch.use_deterministic_algorithms(not ENABLE_TF32, warn_only=True)
+if not ENABLE_TF32:
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 from data import load_split_data
 from data_llama import LlamaRecDataset, LlamaCollator
@@ -40,11 +44,13 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default="./config/llama_instrument2018.yaml")
     parser.add_argument('--skip_id', action='store_true', help='跳过 train_id 阶段，只运行 train_rec（用于调试）')
+    parser.add_argument('--debug', action='store_true', help='使用小数据集快速验证（1000 train, 500 valid/test）')
+    parser.add_argument('--debug_samples', type=int, default=1000, help='debug 模式下的训练样本数')
     args, unknown_args = parser.parse_known_args()
     return args, unknown_args
 
 
-def train(config, verbose=True, rank=0, skip_id=False):
+def train(config, verbose=True, rank=0, skip_id=False, debug=False, debug_samples=1000):
     """主训练函数"""
     init_seed(config['seed'], config['reproducibility'])
     init_logger(config)
@@ -55,9 +61,19 @@ def train(config, verbose=True, rank=0, skip_id=False):
     log(f'Device: {config["device"]}', accelerator, logger)
     log(f'Config: {str(config)}', accelerator, logger)
     
+    if debug:
+        log(f'⚠️ DEBUG 模式: 使用 {debug_samples} 训练样本, {debug_samples//2} 验证/测试样本', accelerator, logger)
+    
     # === 加载数据 ===
     item2id, num_items, train_seq, valid_seq, test_seq = load_split_data(config)
     config['n_items'] = num_items
+    
+    # ⭐ Debug 模式：截取小数据集
+    if debug:
+        train_seq = train_seq[:debug_samples]
+        valid_seq = valid_seq[:debug_samples//2]
+        test_seq = test_seq[:debug_samples//2]
+        log(f'截取后: train={len(train_seq)}, valid={len(valid_seq)}, test={len(test_seq)}', accelerator, logger)
     
     code_num = config['code_num']
     code_length = config['code_length']
@@ -165,30 +181,38 @@ def train(config, verbose=True, rank=0, skip_id=False):
     
     # === 创建 DataLoader ===
     collator = LlamaCollator()
+    num_workers = config['num_workers']
     
+    # ⭐ DataLoader 优化：prefetch + persistent_workers
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collator,
-        num_workers=config['num_workers'],
-        pin_memory=True
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=2 if num_workers > 0 else None,  # 预取下一批数据
+        persistent_workers=num_workers > 0  # 保持 worker 进程，避免重复初始化
     )
     valid_loader = DataLoader(
         valid_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
         collate_fn=collator,
-        num_workers=config['num_workers'],
-        pin_memory=True
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
         collate_fn=collator,
-        num_workers=config['num_workers'],
-        pin_memory=True
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0
     )
     
     # === 创建 Trainer ===
@@ -248,9 +272,10 @@ if __name__ == "__main__":
     config['save_path'] = f'./myckpt/llama_{dataset}/{ckpt_name}'
     
     config = convert_config_dict(config)
-    config['accelerator'] = Accelerator(kwargs_handlers=[ddp_kwargs])
+    config['accelerator'] = accelerator  # ⭐ 复用同一个 Accelerator，避免重复创建
     config['skip_id'] = args.skip_id  # 传递 skip_id 参数
     
     # 开始训练
-    train(config, verbose=(local_rank == 0), rank=local_rank, skip_id=args.skip_id)
+    train(config, verbose=(local_rank == 0), rank=local_rank, 
+          skip_id=args.skip_id, debug=args.debug, debug_samples=args.debug_samples)
 
