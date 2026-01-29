@@ -32,7 +32,7 @@ semantic_hidden_size: 1024  # DualSCID checkpoint 使用 1024
 code_num: 256
 code_length: 4  # RQ-VAE 3层 + 1层 suffix (处理冲突)
 e_dim: 128
-num_beams: 10  # 评估时 beam 数量，减小可加速但略影响效果（推荐 10-20）
+num_beams: 15  # 评估时 beam 数量，减小可加速但略影响效果（推荐 10-20）
 generate_chunk_size: 4  # generate 分批大小，保守设置避免 OOM
 
 # === 训练配置 ===
@@ -64,8 +64,8 @@ lr_scheduler_type: cosine
 warmup_steps: 500
 
 # Batch 配置 (5090 32GB)
-batch_size: 2               # 每卡 batch size
-gradient_accumulation_steps: 8  # 等效 batch_size = 16
+batch_size: 16               # 每卡 batch size
+gradient_accumulation_steps: 1  # 等效 batch_size = 16
 eval_batch_size: 4          # 保守设置，避免 OOM
 num_workers: 4
 

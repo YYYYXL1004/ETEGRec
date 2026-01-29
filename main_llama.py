@@ -183,7 +183,11 @@ def train(config, verbose=True, rank=0, skip_id=False, debug=False, debug_sample
     collator = LlamaCollator()
     num_workers = config['num_workers']
     
-    # ⭐ DataLoader 优化：prefetch + persistent_workers
+    # ⭐ DataLoader 配置：
+    # - persistent_workers=False: 允许 worker 进程在每个 epoch 后重新创建
+    #   这样 trainer._sync_code_table_to_datasets() 更新 all_item_code 后，
+    #   新的 worker 进程会使用更新后的 code table
+    # - 如果设为 True，worker 进程会缓存旧的 all_item_code，导致评估指标为 0
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -191,8 +195,8 @@ def train(config, verbose=True, rank=0, skip_id=False, debug=False, debug_sample
         collate_fn=collator,
         num_workers=num_workers,
         pin_memory=True,
-        prefetch_factor=2 if num_workers > 0 else None,  # 预取下一批数据
-        persistent_workers=num_workers > 0  # 保持 worker 进程，避免重复初始化
+        prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=False  # ⭐ 必须为 False，否则 code table 更新不生效
     )
     valid_loader = DataLoader(
         valid_dataset,
@@ -202,7 +206,7 @@ def train(config, verbose=True, rank=0, skip_id=False, debug=False, debug_sample
         num_workers=num_workers,
         pin_memory=True,
         prefetch_factor=2 if num_workers > 0 else None,
-        persistent_workers=num_workers > 0
+        persistent_workers=False
     )
     test_loader = DataLoader(
         test_dataset,
@@ -212,7 +216,7 @@ def train(config, verbose=True, rank=0, skip_id=False, debug=False, debug_sample
         num_workers=num_workers,
         pin_memory=True,
         prefetch_factor=2 if num_workers > 0 else None,
-        persistent_workers=num_workers > 0
+        persistent_workers=False
     )
     
     # === 创建 Trainer ===

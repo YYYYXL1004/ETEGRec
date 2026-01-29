@@ -250,11 +250,21 @@ class LlamaRecModel(nn.Module):
         dec_latents = self.dec_adapter(last_hidden)  # [B, 256] for PSA
         
         # === 4. 生成 Logits: Weight Tying (点积 Codebook) ===
+        # ⭐ 关键修复：使用 target_positions[i] - 1 的 hidden state
+        # 因为 Causal LM 中，位置 i 的 hidden state 已经看到了位置 i 的 token
+        # 要预测位置 i 的 token，应该用位置 i-1 的 hidden state
         code_logits = []
         codebooks = self.get_codebooks()
         
         for i in range(self.code_length):
-            pos_i = target_positions[:, i]  # [B]
+            # ⭐ 使用前一个位置的 hidden state
+            if i == 0:
+                # 第一个 code：使用历史序列最后一个 token 的 hidden state
+                pos_i = seq_end_positions  # [B]
+            else:
+                # 后续 codes：使用前一个目标 code 位置的 hidden state
+                pos_i = target_positions[:, i - 1]  # [B]
+            
             hidden_at_pos = hidden_states[batch_indices, pos_i]  # [B, 4096]
             
             # Step 1: 投影回 Codebook 维度

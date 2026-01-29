@@ -224,8 +224,8 @@ class LlamaTrainer:
         在 _train_epoch_rec 结束后调用
         """
         with torch.no_grad():
-            rec_model = self.model_rec.module if dist.is_initialized() else self.model_rec
-            id_model = self.model_id.module if dist.is_initialized() else self.model_id
+            rec_model = self.accelerator.unwrap_model(self.model_rec)
+            id_model = self.accelerator.unwrap_model(self.model_id)
             
             for i, vq_layer in enumerate(id_model.rq.vq_layers):
                 vq_layer.embedding.weight.data.copy_(rec_model.codebook_embeddings[i].weight.data)
@@ -236,8 +236,8 @@ class LlamaTrainer:
         在 _train_epoch_id 结束后调用
         """
         with torch.no_grad():
-            rec_model = self.model_rec.module if dist.is_initialized() else self.model_rec
-            id_model = self.model_id.module if dist.is_initialized() else self.model_id
+            rec_model = self.accelerator.unwrap_model(self.model_rec)
+            id_model = self.accelerator.unwrap_model(self.model_id)
             
             for i, vq_layer in enumerate(id_model.rq.vq_layers):
                 rec_model.codebook_embeddings[i].weight.data.copy_(vq_layer.embedding.weight.data)
@@ -277,18 +277,14 @@ class LlamaTrainer:
                 labels = self.all_item_code[targets]  # [B, code_length]
                 
                 # === 获取目标 item 的语义 embedding ===
-                if dist.is_initialized():
-                    target_semantic_embs = self.model_rec.module.semantic_embedding(targets)
-                else:
-                    target_semantic_embs = self.model_rec.semantic_embedding(targets)
+                unwrap_rec = self.accelerator.unwrap_model(self.model_rec)
+                target_semantic_embs = unwrap_rec.semantic_embedding(targets)
                 
                 # model_id 在 train_rec 阶段被冻结
-                # 使用 no_grad + 直接访问 module 避免 DDP hooks 问题
+                # 使用 no_grad + unwrap 避免 DDP hooks 问题
+                unwrap_id = self.accelerator.unwrap_model(self.model_id)
                 with torch.no_grad():
-                    if dist.is_initialized():
-                        target_recon_embs, _, _, _, target_code_logits = self.model_id.module(target_semantic_embs)
-                    else:
-                        target_recon_embs, _, _, _, target_code_logits = self.model_id(target_semantic_embs)
+                    target_recon_embs, _, _, _, target_code_logits = unwrap_id(target_semantic_embs)
                 
                 # 去重优化
                 _, unq_index = np.unique(targets.cpu().numpy(), return_index=True)
@@ -311,10 +307,8 @@ class LlamaTrainer:
                 )
                 
                 # 2. SIA Loss (KL 散度)
-                if dist.is_initialized():
-                    _, _, _, _, seq_code_logits = self.model_id.module.rq(outputs.seq_project_latents)
-                else:
-                    _, _, _, _, seq_code_logits = self.model_id.rq(outputs.seq_project_latents)
+                unwrap_id = self.accelerator.unwrap_model(self.model_id)
+                _, _, _, _, seq_code_logits = unwrap_id.rq(outputs.seq_project_latents)
                 
                 kl_loss = (
                     self.compute_discrete_contrastive_loss_kl(seq_code_logits[unq_index], target_code_logits[unq_index]) +
@@ -371,7 +365,9 @@ class LlamaTrainer:
         # ⭐ 开始前强制清理显存（评估后残留可能导致 OOM）
         gc.collect()
         torch.cuda.empty_cache()
-        torch.cuda.synchronize()  # 确保所有 CUDA 操作完成
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()  # 确保所有 CUDA 操作完成
+            torch.cuda.reset_peak_memory_stats()  # 重置峰值统计
         
         self.model_id.train()
         self.model_rec.eval()
@@ -401,10 +397,8 @@ class LlamaTrainer:
                 targets = batch['targets'].to(self.device)
                 
                 # === 获取目标 item 的语义 embedding ===
-                if dist.is_initialized():
-                    target_semantic_embs = self.model_rec.module.semantic_embedding(targets)
-                else:
-                    target_semantic_embs = self.model_rec.semantic_embedding(targets)
+                unwrap_rec = self.accelerator.unwrap_model(self.model_rec)
+                target_semantic_embs = unwrap_rec.semantic_embedding(targets)
                 
                 target_recon_embs, _, _, _, target_code_logits = self.model_id(target_semantic_embs)
                 
@@ -414,30 +408,19 @@ class LlamaTrainer:
                 unq_input = torch.tensor(unq_input).to(self.device)
                 unq_index = torch.tensor(unq_index).to(self.device)
                 
-                if dist.is_initialized():
-                    unq_semantic_embs = self.model_rec.module.semantic_embedding(unq_input)
-                else:
-                    unq_semantic_embs = self.model_rec.semantic_embedding(unq_input)
+                unq_semantic_embs = unwrap_rec.semantic_embedding(unq_input)
                 
                 unq_recon_embs, commit_loss, _, _, _ = self.model_id(unq_semantic_embs)
                 
                 # === Forward (不计算梯度) ===
-                # model_rec 在 train_id 阶段被冻结，直接访问 module 避免 DDP hooks
+                # model_rec 在 train_id 阶段被冻结，使用 unwrap 避免 DDP hooks
                 with torch.no_grad():
-                    if dist.is_initialized():
-                        outputs = self.model_rec.module(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            seq_end_positions=seq_end_positions,
-                            target_positions=target_positions,
-                        )
-                    else:
-                        outputs = self.model_rec(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            seq_end_positions=seq_end_positions,
-                            target_positions=target_positions,
-                        )
+                    outputs = unwrap_rec(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        seq_end_positions=seq_end_positions,
+                        target_positions=target_positions,
+                    )
                 
                 # === Loss 计算 ===
                 
@@ -454,10 +437,8 @@ class LlamaTrainer:
                 vq_loss = recon_loss + self.alpha * commit_loss
                 
                 # 2. SIA Loss
-                if dist.is_initialized():
-                    _, _, _, _, seq_code_logits = self.model_id.module.rq(outputs.seq_project_latents)
-                else:
-                    _, _, _, _, seq_code_logits = self.model_id.rq(outputs.seq_project_latents)
+                unwrap_id = self.accelerator.unwrap_model(self.model_id)
+                _, _, _, _, seq_code_logits = unwrap_id.rq(outputs.seq_project_latents)
                 
                 kl_loss = (
                     self.compute_discrete_contrastive_loss_kl(seq_code_logits[unq_index], target_code_logits[unq_index]) +
@@ -624,53 +605,34 @@ class LlamaTrainer:
                     self.log(f"[DEBUG] ⚠️ Labels mismatch! Code table has been updated.")
             
             # 生成预测
-            if dist.is_initialized():
-                preds = self.model_rec.module.generate(
-                    input_ids=history_input_ids,
-                    attention_mask=history_attention_mask,
-                    num_return_sequences=10
-                )
-                
-                # ⭐ DEBUG: 打印生成结果
-                if debug_first_batch and self.accelerator.is_main_process:
-                    self.log(f"[DEBUG] preds shape: {preds.shape}")
-                    self.log(f"[DEBUG] preds[0]: {preds[0].tolist()}")
-                    self.log(f"[DEBUG] Expected label[0]: {labels[0].tolist()}")
-                    # 检查是否有任何匹配
-                    for beam_idx in range(min(10, preds.shape[1])):
-                        match = torch.all(preds[0, beam_idx] == labels[0]).item()
-                        self.log(f"[DEBUG] Beam {beam_idx}: {preds[0, beam_idx].tolist()} match={match}")
-                    debug_first_batch = False
-                
-                # ⭐ 释放输入
-                del history_input_ids, history_attention_mask
-                
+            unwrap_rec = self.accelerator.unwrap_model(self.model_rec)
+            preds = unwrap_rec.generate(
+                input_ids=history_input_ids,
+                attention_mask=history_attention_mask,
+                num_return_sequences=10
+            )
+            
+            # ⭐ DEBUG: 打印生成结果
+            if debug_first_batch and self.accelerator.is_main_process:
+                self.log(f"[DEBUG] preds shape: {preds.shape}")
+                self.log(f"[DEBUG] preds[0]: {preds[0].tolist()}")
+                self.log(f"[DEBUG] Expected label[0]: {labels[0].tolist()}")
+                # 检查是否有任何匹配
+                for beam_idx in range(min(10, preds.shape[1])):
+                    match = torch.all(preds[0, beam_idx] == labels[0]).item()
+                    self.log(f"[DEBUG] Beam {beam_idx}: {preds[0, beam_idx].tolist()} match={match}")
+                debug_first_batch = False
+            
+            # ⭐ 释放输入
+            del history_input_ids, history_attention_mask
+            
+            # 收集多卡结果
+            if self.accelerator.num_processes > 1:
                 all_preds, all_labels = self.accelerator.gather_for_metrics((preds, labels))
                 _metrics = self.evaluate(all_preds, all_labels)
                 total += len(all_labels)
-                
-                # ⭐ 释放中间结果
                 del preds, all_preds, all_labels
             else:
-                preds = self.model_rec.generate(
-                    input_ids=history_input_ids,
-                    attention_mask=history_attention_mask,
-                    num_return_sequences=10
-                )
-                
-                # ⭐ DEBUG: 打印生成结果 (单卡模式)
-                if debug_first_batch and self.accelerator.is_main_process:
-                    self.log(f"[DEBUG] preds shape: {preds.shape}")
-                    self.log(f"[DEBUG] preds[0]: {preds[0].tolist()}")
-                    self.log(f"[DEBUG] Expected label[0]: {labels[0].tolist()}")
-                    # 检查是否有任何匹配
-                    for beam_idx in range(min(10, preds.shape[1])):
-                        match = torch.all(preds[0, beam_idx] == labels[0]).item()
-                        self.log(f"[DEBUG] Beam {beam_idx}: {preds[0, beam_idx].tolist()} match={match}")
-                    debug_first_batch = False
-                
-                del history_input_ids, history_attention_mask
-                
                 _metrics = self.evaluate(preds, labels)
                 total += len(labels)
                 del preds
@@ -682,6 +644,12 @@ class LlamaTrainer:
         
         for m in metrics:
             metrics[m] = round(metrics[m] / total, 6)
+        
+        # ⭐ 评估结束后强制清理显存
+        gc.collect()
+        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         
         return metrics
     
@@ -716,18 +684,12 @@ class LlamaTrainer:
                 test_batch = next(iter(self.valid_data))
                 input_ids = test_batch['input_ids'].to(self.device)
                 attention_mask = test_batch['attention_mask'].to(self.device)
-                if dist.is_initialized():
-                    _ = self.model_rec.module.generate(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        num_return_sequences=10
-                    )
-                else:
-                    _ = self.model_rec.generate(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        num_return_sequences=10
-                    )
+                unwrap_rec = self.accelerator.unwrap_model(self.model_rec)
+                _ = unwrap_rec.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    num_return_sequences=10
+                )
             # 清理显存
             torch.cuda.empty_cache()
             if verbose:
@@ -743,11 +705,8 @@ class LlamaTrainer:
             # 如果 skip_id=True，跳过所有 ID epoch
             if skip_id and is_id_epoch:
                 self.log(f"[Epoch {epoch_idx}] 跳过 Train ID (skip_id=True)")
-                # 仍然需要更新 item code 表
-                all_item_code = self.get_code(epoch_idx=epoch_idx, verbose=verbose)
-                self.all_item_code = torch.tensor(all_item_code).to(self.device)
-                # ⭐ 同步更新数据集中的 all_item_code
-                self._sync_code_table_to_datasets()
+                # ⭐ skip_id 模式下不更新 code table，保持 codes 固定
+                # 这样模型学习的目标是稳定的
                 continue
             
             # 设置 Loss 权重和冻结策略
@@ -790,16 +749,25 @@ class LlamaTrainer:
             
             # 评估 (前后都清理显存，避免 OOM)
             if (epoch_idx + 1) % self.eval_step == 0:
+                # ⭐ 评估前强制清理显存
                 gc.collect()
                 torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    # 打印当前显存使用情况
+                    if verbose and self.accelerator.is_main_process:
+                        allocated = torch.cuda.memory_allocated() / 1024**3
+                        reserved = torch.cuda.memory_reserved() / 1024**3
+                        self.log(f"[Memory] Before eval: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
                 
                 metrics = self._test_epoch(test_data=self.valid_data, verbose=verbose)
                 
                 # ⭐ 评估后强制清理显存，避免下一个 epoch OOM
                 gc.collect()
                 torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.reset_peak_memory_stats()  # 重置峰值统计
                 
                 if metrics[self.valid_metric] > self.best_score:
                     self.best_score = metrics[self.valid_metric]
@@ -829,20 +797,48 @@ class LlamaTrainer:
         
         ⭐ 关键修复：FORGE load balancing 更新 code table 后，
         数据集中的历史序列 codes 也需要同步更新，否则训练和评估会不一致
+        
+        注意：当 num_workers > 0 时，DataLoader 的 worker 进程会 fork 主进程内存，
+        更新 dataset.all_item_code 后需要重置 workers 才能生效
         """
-        # accelerate 包装后，需要通过 .dataset 访问原始数据集
-        for dataloader in [self.train_data, self.valid_data, self.test_data]:
+        all_item_code_cpu = self.all_item_code.cpu()
+        
+        for name, dataloader in [('train', self.train_data), ('valid', self.valid_data), ('test', self.test_data)]:
             if dataloader is None:
                 continue
-            # 获取原始数据集
+            
+            # accelerate 包装后的 DataLoader 结构：
+            # DataLoaderShard -> DataLoader -> Dataset
+            # 或者 DataLoaderDispatcher -> DataLoader -> Dataset
+            dataset = None
+            
+            # 尝试多种方式获取原始数据集
             if hasattr(dataloader, 'dataset'):
+                # 直接有 dataset 属性
                 dataset = dataloader.dataset
-            else:
-                dataset = dataloader
+            
+            # 如果 dataset 还是包装类型，继续解包
+            while dataset is not None and hasattr(dataset, 'dataset'):
+                dataset = dataset.dataset
             
             # 更新 all_item_code
-            if hasattr(dataset, 'all_item_code'):
-                dataset.all_item_code = self.all_item_code.cpu()
+            if dataset is not None and hasattr(dataset, 'all_item_code'):
+                dataset.all_item_code = all_item_code_cpu
+            
+            # ⭐ 重置 DataLoader 的 worker 进程，确保它们使用新的 all_item_code
+            # 对于 accelerate 包装的 DataLoader，需要访问内部的 base_dataloader
+            base_dataloader = dataloader
+            if hasattr(dataloader, 'base_dataloader'):
+                base_dataloader = dataloader.base_dataloader
+            
+            # 如果有 _iterator，删除它以强制重新创建 workers
+            if hasattr(base_dataloader, '_iterator') and base_dataloader._iterator is not None:
+                # 关闭现有的 workers
+                try:
+                    base_dataloader._iterator._shutdown_workers()
+                except:
+                    pass
+                base_dataloader._iterator = None
     
     def _freeze_model(self, model):
         """冻结模型参数"""
@@ -881,12 +877,12 @@ class LlamaTrainer:
         self.model_id.eval()
         
         # 获取语义 embedding
-        if dist.is_initialized():
-            all_item_embs = self.model_rec.module.semantic_embedding.weight.data[1:]
-            all_item_prefix = self.model_id.module.get_indices(all_item_embs).detach().cpu().numpy()
-        else:
-            all_item_embs = self.model_rec.semantic_embedding.weight.data[1:]
-            all_item_prefix = self.model_id.get_indices(all_item_embs).detach().cpu().numpy()
+        # 使用 accelerator.unwrap_model 来正确获取原始模型
+        unwrap_rec = self.accelerator.unwrap_model(self.model_rec)
+        unwrap_id = self.accelerator.unwrap_model(self.model_id)
+        
+        all_item_embs = unwrap_rec.semantic_embedding.weight.data[1:]
+        all_item_prefix = unwrap_id.get_indices(all_item_embs).detach().cpu().numpy()
         
         all_item_prefix = all_item_prefix.tolist()
         

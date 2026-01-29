@@ -59,4 +59,5 @@ accelerate launch --config_file accelerate_config_llama.yaml main_llama.py \
     --rec_kl_loss=0.0001 \
     --rec_dec_cl_loss=0.0003 \
     --id_kl_loss=0.0001 \
+    --skip_id \
     --id_dec_cl_loss=0.0003
