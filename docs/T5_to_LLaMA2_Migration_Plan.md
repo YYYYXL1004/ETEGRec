@@ -1,4 +1,4 @@
-# ETEGRec: T5 → LLaMA2-7B-HF 迁移方案 (Final v3.3)
+# ETEGRec: T5 → LLaMA2-7B-HF 迁移方案 (Final v3.4)
 
 > **目标设备**: RTX 5090 32GB × N 卡  
 > **参考**: Align3GR, MiniOneRec, OpenOneRec
@@ -22,16 +22,17 @@
 | v3.0 | 基础架构设计，SoftEmbedding + code_heads |
 | v3.1 | 移除 code_heads，改用 Weight Tying；SIA 改用 Last Token |
 | v3.2 | 添加 Projector 初始化；澄清不需要显式 SEQ_END token |
-| **v3.3** | **实际工程实现：DDP兼容、独立Codebook、Suffix层、8-bit Adam、分批Generate** |
+| v3.3 | 实际工程实现：DDP兼容、独立Codebook、Suffix层、8-bit Adam、分批Generate |
+| **v3.4** | **生产级实现：Causal LM 位置修复、Code Table 动态同步、SDPA 注意力、TF32 加速** |
 
-### ⭐ v3.3 关键修正 (vs v3.2)
+### ⭐ v3.4 关键修正 (vs v3.3)
 
-1. **独立 Codebook 副本**：model_rec 持有从 rqvae 复制的独立 codebook，避免 DDP 共享参数问题
-2. **Suffix Embedding**：第 4 层使用独立的 `suffix_embedding` 处理冲突计数
-3. **8-bit AdamW**：LLaMA 使用 `bitsandbytes` 8-bit 优化器节省显存
-4. **分批 Generate**：推理时分 chunk forward，避免 OOM
-5. **Gradient Checkpointing**：使用 `use_reentrant=False` 解决 DDP 兼容性
-6. **5090 补丁**：禁用 TF32，启用确定性算法
+1. **Causal LM 位置修复**：生成 Logits 时使用 `target_positions[i-1]` 而非 `target_positions[i]`
+2. **Code Table 动态同步**：`_sync_code_table_to_datasets()` 确保训练/评估使用最新 codes
+3. **SDPA 注意力**：使用 PyTorch 2.0 原生 SDPA，兼容 RTX 5090 (Blackwell)
+4. **TF32 加速**：可选启用 TF32 获得 ~30% 加速
+5. **显存管理优化**：评估前后强制 GC + cache 清理，避免 OOM
+6. **Debug 模式**：支持小数据集快速验证
 
 ---
 
@@ -47,6 +48,7 @@
 | **LoRA** | q/k/v/o_proj，显式训练 Projectors |
 | **优化器** | 8-bit AdamW (LLaMA) + 普通 AdamW (RQ-VAE) |
 | **显存优化** | Gradient Checkpointing (non-reentrant) + bf16 + 分批 Generate |
+| **注意力实现** | SDPA (PyTorch 原生)，兼容 Blackwell 架构 |
 
 ---
 
@@ -96,29 +98,29 @@ class LlamaRecModel(nn.Module):
         self.code_length = config['code_length']  # 4
         self.code_num = config['code_num']  # 256
         self.codebook_dim = config['e_dim']  # 128
-        self.semantic_dim = config['semantic_hidden_size']  # 256 or 1024 (DualSCID)
+        self.semantic_dim = config['semantic_hidden_size']  # 1024 (DualSCID)
         self.n_items = config['n_items']
         self.num_beams = config.get('num_beams', 20)
+        self.generate_chunk_size = config.get('generate_chunk_size', 4)  # ⭐ 可配置
         
         # === 加载 LLaMA 基座 ===
         # 注意: 多卡训练时不能用 device_map="auto"，由 accelerate 管理设备
+        # 注意: RTX 5090 (Blackwell) 暂不支持 flash_attn，使用 SDPA (PyTorch 原生)
         self.llama = AutoModelForCausalLM.from_pretrained(
             llama_path,
             torch_dtype=torch.bfloat16,
-            trust_remote_code=True
+            trust_remote_code=True,
+            attn_implementation="sdpa"  # ⭐ PyTorch 2.0 原生 SDPA
         )
         self.hidden_size = self.llama.config.hidden_size  # 4096
         
         # 启用 Gradient Checkpointing (节省显存)
         # 使用 use_reentrant=False 解决 DDP 兼容性问题
-        # (避免 "parameter marked ready twice" 错误)
         self.llama.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
         
         # === ⭐ Codebook Embeddings (独立副本，避免 DDP 共享参数问题) ===
-        # 从 rqvae 复制权重，model_rec 和 model_id 各持有独立的 codebook
-        # 训练时需要在 trainer 中手动同步
         num_rqvae_layers = len(rqvae.rq.vq_layers)
         self.num_rqvae_layers = num_rqvae_layers  # 保存层数 (3)
         
@@ -146,7 +148,6 @@ class LlamaRecModel(nn.Module):
         self.semantic_embedding.requires_grad_(False)
         
         # === ⭐ Suffix Embedding (用于第 4 层，处理冲突计数) ===
-        # 与原版 T5 一致，suffix 有独立的 embedding 层
         self.suffix_embedding = nn.Embedding(self.code_num, self.codebook_dim)
         self.suffix_embedding.requires_grad_(True)
         
@@ -169,7 +170,7 @@ class LlamaRecModel(nn.Module):
         for param in self.dec_adapter.parameters():
             param.requires_grad_(True)
         
-        # === 初始化自定义层 (v3.2: 防止梯度爆炸/消失) ===
+        # === 初始化自定义层 ===
         self._init_custom_weights()
     
     def _init_custom_weights(self):
@@ -263,14 +264,24 @@ class LlamaRecModel(nn.Module):
         last_hidden = hidden_states[batch_indices, seq_end_positions]  # [B, 4096]
         
         seq_project_latents = self.enc_adapter(last_hidden)  # [B, 128] for SIA
-        dec_latents = self.dec_adapter(last_hidden)  # [B, 256] for PSA
+        dec_latents = self.dec_adapter(last_hidden)  # [B, semantic_dim] for PSA
         
-        # 4. 生成 Logits: Weight Tying (点积 Codebook)
+        # 4. ⭐ 生成 Logits: Weight Tying (点积 Codebook)
+        # 关键修复：使用 target_positions[i] - 1 的 hidden state
+        # 因为 Causal LM 中，位置 i 的 hidden state 已经看到了位置 i 的 token
+        # 要预测位置 i 的 token，应该用位置 i-1 的 hidden state
         code_logits = []
         codebooks = self.get_codebooks()
         
         for i in range(self.code_length):
-            pos_i = target_positions[:, i]
+            # ⭐ 使用前一个位置的 hidden state
+            if i == 0:
+                # 第一个 code：使用历史序列最后一个 token 的 hidden state
+                pos_i = seq_end_positions  # [B]
+            else:
+                # 后续 codes：使用前一个目标 code 位置的 hidden state
+                pos_i = target_positions[:, i - 1]  # [B]
+            
             hidden_at_pos = hidden_states[batch_indices, pos_i]
             
             # Step 1: 投影回 Codebook 维度
@@ -308,9 +319,7 @@ class LlamaRecModel(nn.Module):
         device = input_ids.device
         codebooks = self.get_codebooks()
         num_beams = self.num_beams
-        
-        # 分批forward的chunk大小（每次最多forward多少个序列）
-        chunk_size = 4  # 可根据显存调整
+        chunk_size = self.generate_chunk_size
         
         # Beam Search 初始化
         input_ids_expanded = input_ids.repeat_interleave(num_beams, dim=0)
@@ -337,14 +346,13 @@ class LlamaRecModel(nn.Module):
                 outputs = self.llama(
                     inputs_embeds=chunk_embeds.to(torch.bfloat16),
                     attention_mask=chunk_mask,
-                    use_cache=False,  # 不用KV Cache，简化逻辑
+                    use_cache=False,
                     output_hidden_states=True,
                     return_dict=True
                 )
                 
                 all_hidden_states.append(outputs.hidden_states[-1][:, -1, :])
                 del outputs
-                torch.cuda.empty_cache()
             
             # 合并结果
             last_hidden = torch.cat(all_hidden_states, dim=0)
@@ -353,6 +361,8 @@ class LlamaRecModel(nn.Module):
             # 投影 + 点积 Codebook
             last_hidden = last_hidden.to(self.output_projector.weight.dtype)
             query_emb = self.output_projector(last_hidden)
+            del last_hidden  # ⭐ 释放大张量
+            
             if code_idx < self.num_rqvae_layers:
                 codebook_weight = codebooks[code_idx].weight.t()
             else:
@@ -397,6 +407,7 @@ class LlamaRecModel(nn.Module):
         generated_codes = torch.stack(generated_codes, dim=-1)  # [B, beams, code_length]
         return generated_codes[:, :num_return_sequences, :]
 ```
+
 
 ### 3.2 DataLoader 设计 (data_llama.py)
 
@@ -531,8 +542,8 @@ class LlamaTrainer:
     def _sync_codebook_to_model_id(self):
         """model_rec.codebook_embeddings → model_id.rq.vq_layers"""
         with torch.no_grad():
-            rec_model = self.model_rec.module if dist.is_initialized() else self.model_rec
-            id_model = self.model_id.module if dist.is_initialized() else self.model_id
+            rec_model = self.accelerator.unwrap_model(self.model_rec)
+            id_model = self.accelerator.unwrap_model(self.model_id)
             
             for i, vq_layer in enumerate(id_model.rq.vq_layers):
                 vq_layer.embedding.weight.data.copy_(rec_model.codebook_embeddings[i].weight.data)
@@ -540,11 +551,54 @@ class LlamaTrainer:
     def _sync_codebook_to_model_rec(self):
         """model_id.rq.vq_layers → model_rec.codebook_embeddings"""
         with torch.no_grad():
-            rec_model = self.model_rec.module if dist.is_initialized() else self.model_rec
-            id_model = self.model_id.module if dist.is_initialized() else self.model_id
+            rec_model = self.accelerator.unwrap_model(self.model_rec)
+            id_model = self.accelerator.unwrap_model(self.model_id)
             
             for i, vq_layer in enumerate(id_model.rq.vq_layers):
                 rec_model.codebook_embeddings[i].weight.data.copy_(vq_layer.embedding.weight.data)
+    
+    # === ⭐ Code Table 动态同步 (v3.4 新增) ===
+    
+    def _sync_code_table_to_datasets(self):
+        """
+        同步 all_item_code 到所有数据集
+        
+        ⭐ 关键修复：FORGE load balancing 更新 code table 后，
+        数据集中的历史序列 codes 也需要同步更新，否则训练和评估会不一致
+        
+        注意：当 num_workers > 0 时，DataLoader 的 worker 进程会 fork 主进程内存，
+        更新 dataset.all_item_code 后需要重置 workers 才能生效
+        """
+        all_item_code_cpu = self.all_item_code.cpu()
+        
+        for name, dataloader in [('train', self.train_data), ('valid', self.valid_data), ('test', self.test_data)]:
+            if dataloader is None:
+                continue
+            
+            # accelerate 包装后的 DataLoader 结构：
+            # DataLoaderShard -> DataLoader -> Dataset
+            dataset = None
+            
+            if hasattr(dataloader, 'dataset'):
+                dataset = dataloader.dataset
+            
+            while dataset is not None and hasattr(dataset, 'dataset'):
+                dataset = dataset.dataset
+            
+            if dataset is not None and hasattr(dataset, 'all_item_code'):
+                dataset.all_item_code = all_item_code_cpu
+            
+            # ⭐ 重置 DataLoader 的 worker 进程
+            base_dataloader = dataloader
+            if hasattr(dataloader, 'base_dataloader'):
+                base_dataloader = dataloader.base_dataloader
+            
+            if hasattr(base_dataloader, '_iterator') and base_dataloader._iterator is not None:
+                try:
+                    base_dataloader._iterator._shutdown_workers()
+                except:
+                    pass
+                base_dataloader._iterator = None
     
     def _train_epoch_rec(self, epoch_idx, loss_w, verbose=True):
         """训练推荐器 (冻结 Tokenizer)"""
@@ -556,21 +610,20 @@ class LlamaTrainer:
             attention_mask = batch['attention_mask'].to(self.device)
             seq_end_positions = batch['seq_end_positions'].to(self.device)
             target_positions = batch['target_positions'].to(self.device)
-            labels = batch['labels'].to(self.device)
             targets = batch['targets'].to(self.device)
             
-            # 目标 item 的语义 embedding
-            if dist.is_initialized():
-                target_semantic_embs = self.model_rec.module.semantic_embedding(targets)
-            else:
-                target_semantic_embs = self.model_rec.semantic_embedding(targets)
+            # ⭐ 关键修复：使用当前的 all_item_code 表获取正确的 labels
+            # 数据集中的 labels 是初始化时的 codes，但 codes 会在训练中更新
+            labels = self.all_item_code[targets]  # [B, code_length]
             
-            # ⭐ model_id 在 train_rec 阶段被冻结，使用 no_grad + 直接访问 module
+            # 目标 item 的语义 embedding
+            unwrap_rec = self.accelerator.unwrap_model(self.model_rec)
+            target_semantic_embs = unwrap_rec.semantic_embedding(targets)
+            
+            # ⭐ model_id 在 train_rec 阶段被冻结
+            unwrap_id = self.accelerator.unwrap_model(self.model_id)
             with torch.no_grad():
-                if dist.is_initialized():
-                    target_recon_embs, _, _, _, target_code_logits = self.model_id.module(target_semantic_embs)
-                else:
-                    target_recon_embs, _, _, _, target_code_logits = self.model_id(target_semantic_embs)
+                target_recon_embs, _, _, _, target_code_logits = unwrap_id(target_semantic_embs)
             
             # Forward
             outputs = self.model_rec(
@@ -589,10 +642,7 @@ class LlamaTrainer:
             )
             
             # 2. SIA Loss (KL 散度)
-            if dist.is_initialized():
-                _, _, _, _, seq_code_logits = self.model_id.module.rq(outputs.seq_project_latents)
-            else:
-                _, _, _, _, seq_code_logits = self.model_id.rq(outputs.seq_project_latents)
+            _, _, _, _, seq_code_logits = unwrap_id.rq(outputs.seq_project_latents)
             
             kl_loss = (
                 self.compute_discrete_contrastive_loss_kl(seq_code_logits, target_code_logits) +
@@ -617,14 +667,59 @@ class LlamaTrainer:
         
         # ⭐ 同步 codebook: model_rec → model_id
         self._sync_codebook_to_model_id()
-    
-    def _train_epoch_id(self, epoch_idx, loss_w, verbose=True):
-        """训练 Tokenizer (冻结 Recommender)"""
-        # ... 类似 _train_epoch_rec ...
         
-        # ⭐ 同步 codebook: model_id → model_rec
-        self._sync_codebook_to_model_rec()
+        # ⭐ 训练结束后清理显存
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    @torch.no_grad()
+    def _test_epoch(self, test_data=None, verbose=True):
+        """评估一个 epoch"""
+        self.model_rec.eval()
+        self.model_id.eval()
+        
+        for batch in test_data:
+            input_ids = batch['input_ids'].to(self.device)
+            attention_mask = batch['attention_mask'].to(self.device)
+            targets = batch['targets'].to(self.device)
+            seq_end_positions = batch['seq_end_positions'].to(self.device)
+            
+            # ⭐ 关键修复：使用当前的 all_item_code 表获取正确的 labels
+            labels = self.all_item_code[targets]  # [B, code_length]
+            
+            # ⭐ 截取历史部分：generate 只需要历史 codes，不需要目标
+            batch_size = input_ids.size(0)
+            
+            history_list = []
+            for i in range(batch_size):
+                end_pos = seq_end_positions[i].item() + 1
+                history_list.append(input_ids[i, :end_pos])
+            
+            # 重新左 padding
+            max_history_len = max(h.size(0) for h in history_list)
+            history_input_ids = torch.full((batch_size, max_history_len), -1, dtype=torch.long, device=self.device)
+            history_attention_mask = torch.zeros((batch_size, max_history_len), dtype=torch.long, device=self.device)
+            
+            for i, h in enumerate(history_list):
+                pad_len = max_history_len - h.size(0)
+                history_input_ids[i, pad_len:] = h
+                history_attention_mask[i] = (history_input_ids[i] != -1).long()
+            
+            # 生成预测
+            unwrap_rec = self.accelerator.unwrap_model(self.model_rec)
+            preds = unwrap_rec.generate(
+                input_ids=history_input_ids,
+                attention_mask=history_attention_mask,
+                num_return_sequences=10
+            )
+            
+            # 计算指标...
+        
+        # ⭐ 评估结束后强制清理显存
+        gc.collect()
+        torch.cuda.empty_cache()
 ```
+
 
 ---
 
@@ -656,7 +751,8 @@ semantic_hidden_size: 1024  # DualSCID = 256 + 768
 code_num: 256
 code_length: 4  # RQ-VAE 3层 + 1层 suffix
 e_dim: 128
-num_beams: 20
+num_beams: 15               # ⭐ 评估时 beam 数量，减小可加速
+generate_chunk_size: 4      # ⭐ generate 分批大小，保守设置避免 OOM
 
 # === 训练配置 ===
 epochs: 50
@@ -687,9 +783,9 @@ lr_scheduler_type: cosine
 warmup_steps: 500
 
 # Batch 配置 (5090 32GB)
-batch_size: 2               # 每卡 batch size
-gradient_accumulation_steps: 8  # 等效 batch_size = 16
-eval_batch_size: 4
+batch_size: 16              # ⭐ 每卡 batch size
+gradient_accumulation_steps: 1
+eval_batch_size: 4          # ⭐ 保守设置，避免 OOM
 num_workers: 4
 
 # 序列配置
@@ -700,6 +796,12 @@ eval_step: 2
 early_stop: 10
 metrics: recall@1,recall@5,ndcg@5,recall@10,ndcg@10
 valid_metric: ndcg@10
+
+# === RQ-VAE 配置 ===
+rqvae_path: ./RQVAE/rqvae_ckpt/DualSCID/Dec-23-2025_13-49-09/best_collision_0.0056_gini_0.2534.pth
+num_emb_list: [256,256,256]
+beta: 0.25
+layers: [1024, 512, 256]
 ```
 
 ---
@@ -708,10 +810,13 @@ valid_metric: ndcg@10
 
 ```python
 # === 5090 迁移专用补丁 ===
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
-torch.use_deterministic_algorithms(True, warn_only=True)
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+# TF32 设置：启用可加速 ~30%，但会有微小精度损失（通常 <0.1%）
+ENABLE_TF32 = True  # ⭐ 改为 True 可加速
+torch.backends.cuda.matmul.allow_tf32 = ENABLE_TF32
+torch.backends.cudnn.allow_tf32 = ENABLE_TF32
+torch.use_deterministic_algorithms(not ENABLE_TF32, warn_only=True)
+if not ENABLE_TF32:
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 # DDP 配置：
 # - find_unused_parameters: LoRA 场景下部分参数可能不参与 loss
@@ -740,8 +845,12 @@ accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
 - [x] **Suffix Embedding** (第4层独立处理)
 - [x] **8-bit AdamW** (节省显存)
 - [x] **分批 Generate** (避免 OOM)
-- [x] **5090 补丁** (禁用 TF32)
+- [x] **5090 补丁** (TF32 可选)
 - [x] **DDP 配置** (find_unused_parameters=True)
+- [x] **SDPA 注意力** (兼容 Blackwell 架构)
+- [x] **Code Table 动态同步** (_sync_code_table_to_datasets)
+- [x] **Causal LM 位置修复** (使用 target_positions[i-1])
+- [x] **显存管理优化** (评估前后 GC + cache 清理)
 
 ---
 
@@ -765,7 +874,7 @@ def sanity_check(model, batch):
     )
     loss.backward()
     
-    print("=== Gradient Check (v3.3) ===")
+    print("=== Gradient Check (v3.4) ===")
     
     # ⭐ 关键：Codebook 必须有梯度！
     codebooks = model.get_codebooks()
@@ -803,11 +912,11 @@ def sanity_check(model, batch):
 
 ---
 
-## 8. v3.3 架构图
+## 8. v3.4 架构图
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           LlamaRecModel v3.3                                     │
+│                           LlamaRecModel v3.4                                     │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                  │
 │  [Input: History Codes]                                                          │
@@ -828,12 +937,13 @@ def sanity_check(model, batch):
 │           │       LLaMA2-7B             │                                       │
 │           │  (LoRA + Gradient Ckpt)     │                                       │
 │           │  use_reentrant=False        │                                       │
+│           │  attn_implementation=sdpa   │  ⭐ v3.4: SDPA 注意力                  │
 │           └───────────┬─────────────────┘                                       │
 │                       │                                                          │
 │           ┌───────────┼───────────┐                                             │
 │           │           │           │                                             │
 │           ▼           ▼           ▼                                             │
-│     [seq_end_pos] [seq_end_pos] [target_pos]                                    │
+│     [seq_end_pos] [seq_end_pos] [target_pos-1]  ⭐ v3.4: Causal LM 位置修复     │
 │           │           │           │                                             │
 │           ▼           ▼           ▼                                             │
 │    ┌──────────┐ ┌──────────┐ ┌────────────────┐                                 │
@@ -864,6 +974,7 @@ def sanity_check(model, batch):
 │  ⭐ 独立 codebook_embeddings + Trainer 手动同步                                  │
 │  ⭐ 8-bit AdamW (LLaMA) + 普通 AdamW (RQ-VAE)                                   │
 │  ⭐ 分批 Generate (避免 OOM)                                                     │
+│  ⭐ Code Table 动态同步 (_sync_code_table_to_datasets)                          │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -878,8 +989,10 @@ def sanity_check(model, batch):
 | ✅ P0 | DataLoader 重构 | 完成 |
 | ✅ P1 | Trainer 适配 (含 Codebook 同步) | 完成 |
 | ✅ P1 | Generate (Beam Search + 分批) | 完成 |
-| 🟡 P2 | 梯度调试 + 形状验证 | 进行中 |
-| 🟡 P2 | 评估 + 调优 | 进行中 |
+| ✅ P2 | Causal LM 位置修复 | 完成 |
+| ✅ P2 | Code Table 动态同步 | 完成 |
+| ✅ P2 | SDPA 注意力 + TF32 加速 | 完成 |
+| 🟡 P3 | 评估 + 调优 | 进行中 |
 
 ---
 
@@ -892,7 +1005,9 @@ def sanity_check(model, batch):
 | Logits 爆炸/NaN | 训练崩溃 | 减小初始化 std (0.02→0.01)，加 gradient clipping |
 | 生成质量差 | 推荐效果下降 | 增加 beam_size，添加 prefix constraint |
 | DDP 参数共享冲突 | 训练报错 | ✅ 已解决：独立 codebook + 手动同步 |
-| Generate OOM | 评估失败 | ✅ 已解决：分批 forward |
+| Generate OOM | 评估失败 | ✅ 已解决：分批 forward + generate_chunk_size 可配置 |
+| Code Table 不同步 | 评估指标为 0 | ✅ 已解决：_sync_code_table_to_datasets |
+| Flash Attention 不兼容 | 5090 报错 | ✅ 已解决：使用 SDPA |
 
 ---
 
@@ -907,4 +1022,29 @@ accelerate launch --config_file accelerate_config_llama.yaml main_llama.py --con
 
 # 调试模式 (跳过 train_id)
 accelerate launch main_llama.py --config ./config/llama_instrument2018.yaml --skip_id
+
+# Debug 模式 (小数据集快速验证)
+accelerate launch main_llama.py --config ./config/llama_instrument2018.yaml --debug --debug_samples 1000
+```
+
+---
+
+## 12. DataLoader 配置注意事项
+
+```python
+# ⭐ DataLoader 配置：
+# - persistent_workers=False: 允许 worker 进程在每个 epoch 后重新创建
+#   这样 trainer._sync_code_table_to_datasets() 更新 all_item_code 后，
+#   新的 worker 进程会使用更新后的 code table
+# - 如果设为 True，worker 进程会缓存旧的 all_item_code，导致评估指标为 0
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    collate_fn=collator,
+    num_workers=num_workers,
+    pin_memory=True,
+    prefetch_factor=2 if num_workers > 0 else None,
+    persistent_workers=False  # ⭐ 必须为 False，否则 code table 更新不生效
+)
 ```
