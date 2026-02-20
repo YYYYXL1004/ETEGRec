@@ -55,6 +55,14 @@ def load_and_preprocess(review_file, min_interactions=5):
     # 2018版本的timestamp已经是秒级，不需要除以1000
     df['timestamp'] = df['timestamp'].astype(float)
     
+    # # 去重: 同一用户对同一item只保留第一次交互 (参考MACRec make_inters_in_order)
+    # before_dedup = len(df)
+    # df = df.sort_values(['user_id', 'timestamp'])
+    # df = df.drop_duplicates(subset=['user_id', 'item_id'], keep='first')
+    # if before_dedup != len(df):
+    #     print(f"🔄 去重: {before_dedup:,} → {len(df):,} 条交互 "
+    #           f"(移除 {before_dedup - len(df):,} 条重复交互)")
+    
     # 迭代过滤 (保留至少min_interactions次交互的用户和物品)
     print(f"🔄 迭代过滤 (最少{min_interactions}次交互)...")
     prev_len = -1
