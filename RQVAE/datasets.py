@@ -54,3 +54,45 @@ class DualEmbDataset(data.Dataset):
 
     def __len__(self):
         return len(self.collab_embeddings)
+
+
+class TripleEmbDataset(data.Dataset):
+    """三模态 Dataset: collab + text + image concat"""
+
+    def __init__(self, collab_path, semantic_path, image_path, normalize=False):
+        self.collab_embeddings = np.load(collab_path)
+        self.semantic_embeddings = np.load(semantic_path)
+        self.image_embeddings = np.load(image_path)
+        
+        # Handle PAD token mismatch
+        if len(self.semantic_embeddings) == len(self.collab_embeddings) + 1:
+            print(f"Detected PAD token in Semantic embeddings. Slicing [1:].")
+            self.semantic_embeddings = self.semantic_embeddings[1:]
+        if len(self.image_embeddings) == len(self.collab_embeddings) + 1:
+            print(f"Detected PAD token in Image embeddings. Slicing [1:].")
+            self.image_embeddings = self.image_embeddings[1:]
+            
+        assert len(self.collab_embeddings) == len(self.semantic_embeddings) == len(self.image_embeddings), \
+            f"Length mismatch: Collab {len(self.collab_embeddings)} vs Semantic {len(self.semantic_embeddings)} vs Image {len(self.image_embeddings)}"
+            
+        if normalize:
+            print("Normalizing Collab, Semantic, and Image embeddings to unit sphere...")
+            self.collab_embeddings = self.collab_embeddings / (np.linalg.norm(self.collab_embeddings, axis=1, keepdims=True) + 1e-9)
+            self.semantic_embeddings = self.semantic_embeddings / (np.linalg.norm(self.semantic_embeddings, axis=1, keepdims=True) + 1e-9)
+            self.image_embeddings = self.image_embeddings / (np.linalg.norm(self.image_embeddings, axis=1, keepdims=True) + 1e-9)
+        else:
+            print("Skipping Normalization (using raw embeddings)...")
+        
+        self.dim = self.collab_embeddings.shape[-1] + self.semantic_embeddings.shape[-1] + self.image_embeddings.shape[-1]
+        print(f"TripleEmbDataset: collab({self.collab_embeddings.shape[-1]}) + text({self.semantic_embeddings.shape[-1]}) + image({self.image_embeddings.shape[-1]}) = {self.dim}")
+
+    def __getitem__(self, index):
+        combined = np.concatenate((
+            self.collab_embeddings[index],
+            self.semantic_embeddings[index],
+            self.image_embeddings[index]
+        ), axis=0)
+        return torch.FloatTensor(combined)
+
+    def __len__(self):
+        return len(self.collab_embeddings)

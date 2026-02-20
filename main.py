@@ -58,6 +58,7 @@ def train(config, verbose=True, rank=0):
     # Dual SCID Logic
     collab_emb_file = config.get("collab_emb_path")
     text_emb_file = config.get("text_emb_path")
+    image_emb_file = config.get("image_emb_path")
     
     if collab_emb_file and text_emb_file:
         collab_emb_path = os.path.join(dataset_path, collab_emb_file)
@@ -83,9 +84,30 @@ def train(config, verbose=True, rank=0):
         else:
             logger.info("Skipping Normalization (using raw embeddings)...")
         
-        semantic_emb = np.concatenate((collab_emb, text_emb), axis=-1)
-        config['semantic_hidden_size'] = semantic_emb.shape[-1] # Should be 1024
-        logger.info(f"Dual SCID enabled. New semantic_hidden_size: {config['semantic_hidden_size']}")
+        emb_list = [collab_emb, text_emb]
+        
+        # 加载图像嵌入 (可选，三模态 concat)
+        if image_emb_file:
+            image_emb_path = os.path.join(dataset_path, image_emb_file)
+            logger.info(f"Loading Image Embeddings: {image_emb_path}")
+            image_emb = np.load(image_emb_path)
+            
+            if len(image_emb) == len(collab_emb) + 1:
+                logger.info("Detected PAD token in Image embeddings. Slicing [1:] to align.")
+                image_emb = image_emb[1:]
+            
+            assert len(image_emb) == len(collab_emb), \
+                f"Image emb length mismatch: {len(image_emb)} vs {len(collab_emb)}"
+            
+            if config.get('normalize', False):
+                image_emb = image_emb / (np.linalg.norm(image_emb, axis=1, keepdims=True) + 1e-9)
+            
+            emb_list.append(image_emb)
+        
+        semantic_emb = np.concatenate(emb_list, axis=-1)
+        config['semantic_hidden_size'] = semantic_emb.shape[-1]
+        modality_names = "Collab+Text" + ("+Image" if image_emb_file else "")
+        logger.info(f"{modality_names} enabled. semantic_hidden_size: {config['semantic_hidden_size']}")
         
     else:
         # Original Logic

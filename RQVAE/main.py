@@ -19,7 +19,7 @@ import logging
 os.environ["TORCH_USE_CUDA_DSA"]="1"
 from torch.utils.data import DataLoader
 
-from datasets import EmbDataset, DualEmbDataset
+from datasets import EmbDataset, DualEmbDataset, TripleEmbDataset
 from vq import RQVAE
 from trainer import  Trainer
 
@@ -42,6 +42,7 @@ def parse_args():
                         help="Input data path.")
     parser.add_argument("--collab_path", type=str, default=None, help="Collaborative embeddings path.")
     parser.add_argument("--semantic_path", type=str, default=None, help="Semantic embeddings path.")
+    parser.add_argument("--image_path", type=str, default=None, help="Image embeddings path.")
     parser.add_argument("--device", type=str, default="cuda:1", help="gpu or cpu")
 
     # model
@@ -95,7 +96,10 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
     """build dataset"""
-    if args.collab_path and args.semantic_path:
+    if args.collab_path and args.semantic_path and args.image_path:
+        print(f"Loading TripleEmbDataset: collab + text + image, normalize={args.normalize}")
+        data = TripleEmbDataset(args.collab_path, args.semantic_path, args.image_path, normalize=args.normalize)
+    elif args.collab_path and args.semantic_path:
         print(f"Loading DualEmbDataset with collab_path={args.collab_path} and semantic_path={args.semantic_path}, normalize={args.normalize}")
         data = DualEmbDataset(args.collab_path, args.semantic_path, normalize=args.normalize)
     else:
