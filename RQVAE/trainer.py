@@ -6,6 +6,7 @@ from time import time
 from torch import optim
 from tqdm import tqdm
 from transformers import get_linear_schedule_with_warmup, get_constant_schedule_with_warmup
+from torch.utils.tensorboard import SummaryWriter
 
 from utils import ensure_dir,set_color,get_local_time, delete_file
 from vq import compute_gini
@@ -49,6 +50,12 @@ class Trainer(object):
         self.optimizer = self._build_optimizer()
         self.scheduler = self._get_scheduler()
         self.model = self.model.to(self.device)
+        
+        # TensorBoard
+        tb_dir = os.path.join(self.ckpt_dir, 'tb_logs')
+        ensure_dir(tb_dir)
+        self.writer = SummaryWriter(log_dir=tb_dir)
+        self.global_step = 0
 
     def _build_optimizer(self):
 
@@ -122,9 +129,20 @@ class Trainer(object):
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.scheduler.step()
-            # print(self.scheduler.get_last_lr())
             total_loss += loss.item()
             total_recon_loss += loss_recon.item()
+            
+            # TensorBoard per-step
+            self.global_step += 1
+            self.writer.add_scalar('step/total_loss', loss.item(), self.global_step)
+            self.writer.add_scalar('step/recon_loss', loss_recon.item(), self.global_step)
+            self.writer.add_scalar('step/vq_loss', rq_loss.item(), self.global_step)
+            self.writer.add_scalar('step/lr', self.scheduler.get_last_lr()[0], self.global_step)
+
+        # TensorBoard per-epoch
+        n_batches = len(train_data)
+        self.writer.add_scalar('epoch/total_loss', total_loss / n_batches, epoch_idx)
+        self.writer.add_scalar('epoch/recon_loss', total_recon_loss / n_batches, epoch_idx)
 
         return total_loss, total_recon_loss
 
@@ -168,7 +186,7 @@ class Trainer(object):
             
         avg_gini = np.mean(gini_list)
 
-        return collision_rate, avg_gini
+        return collision_rate, avg_gini, gini_list
 
     def _save_checkpoint(self, epoch, collision_rate=1, gini=None, ckpt_file=None):
 
@@ -227,7 +245,7 @@ class Trainer(object):
             # eval
             if (epoch_idx + 1) % self.eval_step == 0:
                 valid_start_time = time()
-                collision_rate, avg_gini = self._valid_epoch(data)
+                collision_rate, avg_gini, gini_list = self._valid_epoch(data)
 
                 if train_loss < self.best_loss:
                     self.best_loss = train_loss
@@ -269,6 +287,12 @@ class Trainer(object):
                     + ": %f]"
                 ) % (epoch_idx, valid_end_time - valid_start_time, collision_rate, avg_gini)
 
+                # TensorBoard eval metrics
+                self.writer.add_scalar('eval/collision_rate', collision_rate, epoch_idx)
+                self.writer.add_scalar('eval/avg_gini', avg_gini, epoch_idx)
+                for layer_i, g in enumerate(gini_list):
+                    self.writer.add_scalar(f'eval/gini_layer_{layer_i}', g, epoch_idx)
+
                 self.logger.info(valid_score_output)
                 ckpt_path = self._save_checkpoint(epoch_idx, collision_rate=collision_rate, gini=avg_gini)
                 now_save = (-collision_rate, ckpt_path)
@@ -295,6 +319,7 @@ class Trainer(object):
                     )
                     break
 
+        self.writer.close()
         return self.best_loss, self.best_collision_rate, self.best_gini
 
 

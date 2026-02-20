@@ -18,6 +18,7 @@ logs/*
 myckpt/*
 wandb/
 RQVAE/wandb/
+RQVAE/rqvae_ckpt/
 
 # Datasets
 dataset/*

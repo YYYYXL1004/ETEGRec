@@ -6,7 +6,7 @@ log_dir: ./logs
 map_path: .emb_map.json
 collab_emb_path: Instrument2018_MM_collab_emb_256.npy
 text_emb_path: Instrument2018_MM_sentence-transformer_text_768.npy
-image_emb_path: Instrument2018_MM_clip_image_768.npy
+# image_emb_path: Instrument2018_MM_clip_image_768.npy
 normalize: False
 semantic_hidden_size: 256 # 会被自动更新为 256+768+768=1792
 code_num: 256
@@ -62,7 +62,8 @@ num_beams: 20
 
 alpha: 1
 warm_epoch: 10
-rqvae_path: ./RQVAE/rqvae_ckpt/TripleMM/Feb-20-2026_20-51-50/best_collision_0.0474_gini_0.3255.pth  # 三模态需要重新训练 RQ-VAE，不能复用双模态的
+# rqvae_path: ./RQVAE/rqvae_ckpt/TripleMM/Feb-20-2026_20-51-50/best_collision_0.0474_gini_0.3255.pth  # 三模态需要重新训练 RQ-VAE，不能复用双模态的
+rqvae_path: ./RQVAE/rqvae_ckpt/DualSCID/Feb-20-2026_23-38-26/best_collision_0.0049_gini_0.3784.pth  # 需要在MM数据集上重新训练双模态RQVAE
 
 #rqvae
 num_emb_list: [256,256,256]

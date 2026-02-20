@@ -2,8 +2,8 @@
 DEVICE="cuda:7"
 
 # Paths for Dual SCID
-COLLAB_PATH="/data/yaoxianglin/ETEGRec/RecBole/dataset/Instrument2018_5090/Instrument2018_5090_emb_256.npy"
-SEMANTIC_PATH="/data/yaoxianglin/ETEGRec/RecBole/dataset/Instrument2018_5090/Instrument2018_5090_sentence-transformer_text_768.npy"
+COLLAB_PATH="/data/yaoxianglin/ETEGRec/RecBole/dataset/Instrument2018_MM/Instrument2018_MM_collab_emb_256.npy"
+SEMANTIC_PATH="/data/yaoxianglin/ETEGRec/RecBole/dataset/Instrument2018_MM/Instrument2018_MM_sentence-transformer_text_768.npy"
 CKPT_DIR="./rqvae_ckpt/DualSCID/"
 
 # Create checkpoint directory if it doesn't exist

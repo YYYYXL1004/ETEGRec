@@ -18,6 +18,7 @@ from metrics import *
 from utils import *
 from collections import defaultdict
 from logging import getLogger
+from torch.utils.tensorboard import SummaryWriter
 import zlib
 init(autoreset=True)
     
@@ -116,6 +117,15 @@ class Trainer(object):
         self.accelerator.prepare(self.model_rec, self.rec_optimizer, self.rec_lr_scheduler,
                                  self.model_id, self.id_optimizer, self.id_lr_scheduler,
                                  self.train_data, self.valid_data, self.test_data)
+        
+        # TensorBoard (main process only)
+        self.writer = None
+        if self.accelerator.is_main_process:
+            tb_dir = os.path.join(self.save_path, 'tb_logs')
+            ensure_dir(tb_dir)
+            self.writer = SummaryWriter(log_dir=tb_dir)
+        self.global_step_rec = 0
+        self.global_step_id = 0
 
     def _build_optimizer(self, model, lr, weight_decay):
         params = model.parameters()
@@ -308,6 +318,15 @@ class Trainer(object):
                 for k,v in loss.items():
                     total_loss[k] += v
                 iter_data.set_postfix(loss=loss_mean)
+                
+                # TensorBoard per-step
+                if self.writer is not None:
+                    self.global_step_rec += 1
+                    self.writer.add_scalar('rec_step/total_loss', loss_mean, self.global_step_rec)
+                    self.writer.add_scalar('rec_step/code_loss', code_loss_mean, self.global_step_rec)
+                    self.writer.add_scalar('rec_step/kl_loss', kl_loss_mean, self.global_step_rec)
+                    self.writer.add_scalar('rec_step/dec_cl_loss', dec_cl_loss_mean, self.global_step_rec)
+                    self.writer.add_scalar('rec_step/lr', self.rec_lr_scheduler.get_last_lr()[0], self.global_step_rec)
 
         for k in total_loss.keys():
             total_loss[k] = round(total_loss[k]/total_num, 4)
@@ -439,6 +458,16 @@ class Trainer(object):
                 for k,v in loss.items():
                     total_loss[k] += v
                 iter_data.set_postfix(loss=loss_mean)
+                
+                # TensorBoard per-step
+                if self.writer is not None:
+                    self.global_step_id += 1
+                    self.writer.add_scalar('id_step/total_loss', loss_mean, self.global_step_id)
+                    self.writer.add_scalar('id_step/vq_loss', vq_loss_mean, self.global_step_id)
+                    self.writer.add_scalar('id_step/code_loss', code_loss_mean, self.global_step_id)
+                    self.writer.add_scalar('id_step/kl_loss', kl_loss_mean, self.global_step_id)
+                    self.writer.add_scalar('id_step/dec_cl_loss', dec_cl_loss_mean, self.global_step_id)
+                    self.writer.add_scalar('id_step/lr', self.id_lr_scheduler.get_last_lr()[0], self.global_step_id)
 
         for k in total_loss.keys():
             total_loss[k] = round(total_loss[k]/total_num, 4)
@@ -555,6 +584,14 @@ class Trainer(object):
             self.log(train_loss_output)
             self.log(f'[Epoch {epoch_idx}] REC lr: {self.rec_lr_scheduler.get_lr()} ID lr: {self.id_lr_scheduler.get_lr()}')
             
+            # TensorBoard epoch-level train losses
+            if self.writer is not None:
+                phase = 'id' if epoch_idx % self.cycle == 0 else 'rec'
+                for k, v in train_loss.items():
+                    self.writer.add_scalar(f'epoch/{phase}_{k}', v, epoch_idx)
+                self.writer.add_scalar('epoch/rec_lr', self.rec_lr_scheduler.get_last_lr()[0], epoch_idx)
+                self.writer.add_scalar('epoch/id_lr', self.id_lr_scheduler.get_last_lr()[0], epoch_idx)
+            
 
             if (epoch_idx + 1) % self.eval_step == 0:
                 metrics = self._test_epoch(test_data=self.valid_data, code=self.all_item_code, verbose=verbose)
@@ -572,12 +609,21 @@ class Trainer(object):
                     stop = True
 
                 self.log(f'[Epoch {epoch_idx}] Val Results: {total_metrics}')
+                
+                # TensorBoard eval metrics
+                if self.writer is not None:
+                    for metric_name, metric_val in total_metrics.items():
+                        self.writer.add_scalar(f'val/{metric_name}', metric_val, epoch_idx)
+                    self.writer.add_scalar('val/best_score', self.best_score, epoch_idx)
             
             self.accelerator.wait_for_everyone()
 
             if stop:
                 break
 
+        # Close TensorBoard
+        if self.writer is not None:
+            self.writer.close()
         return self.best_score
 
     def finetune(self, verbose=True):
@@ -633,6 +679,12 @@ class Trainer(object):
             self.log(train_loss_output)
             self.log(f'[Epoch {epoch_idx}] Current REC lr: {self.rec_lr_scheduler.get_lr()}')
             
+            # TensorBoard finetune epoch losses
+            if self.writer is not None:
+                for k, v in train_loss.items():
+                    self.writer.add_scalar(f'finetune_epoch/{k}', v, epoch_idx)
+                self.writer.add_scalar('finetune_epoch/lr', self.rec_lr_scheduler.get_last_lr()[0], epoch_idx)
+            
 
             if (epoch_idx + 1) % self.eval_step == 0:
                 metrics = self._test_epoch(test_data=self.valid_data, code=self.all_item_code, verbose=verbose)
@@ -650,13 +702,21 @@ class Trainer(object):
                     stop = True
 
                 self.log(f'[Epoch {epoch_idx}] Val Results: {total_metrics}')
+                
+                # TensorBoard finetune eval metrics
+                if self.writer is not None:
+                    for metric_name, metric_val in total_metrics.items():
+                        self.writer.add_scalar(f'finetune_val/{metric_name}', metric_val, epoch_idx)
+                    self.writer.add_scalar('finetune_val/best_score', self.best_score, epoch_idx)
             
             self.accelerator.wait_for_everyone()
 
             if stop:
                 break
         
-
+        # Close TensorBoard
+        if self.writer is not None:
+            self.writer.close()
         return self.best_score
     
     @torch.no_grad()
