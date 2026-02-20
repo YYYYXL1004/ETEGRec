@@ -3,9 +3,13 @@
 多模态数据准备脚本 - 在 prepare_data_2018.py 基础上增加图片过滤
 
 与 prepare_data_2018.py 的区别:
-    1. 实际下载图片并验证完整性，过滤掉无法获取图片的item
-       (参考 MACRec load_all_figures.py 的做法，而非仅检查URL是否存在)
-    2. 去除同一用户对同一item的重复交互 (参考 MACRec make_inters_in_order)
+    1. 先用URL存在性初筛 + 5-core过滤，得到最终item集合
+    2. 只下载最终item的图片并验证完整性 (避免下载大量无用图片)
+    3. 踢掉下载失败的item，必要时补一轮5-core
+    (参考 MACRec load_all_figures.py 的图片验证逻辑)
+
+流程:
+    URL初筛 → 5-core → 下载验证图片 → (补充5-core) → 划分 → 输出
 
 输入:
     - Musical_Instruments.json (Amazon 2018 评论数据)
@@ -26,6 +30,7 @@ import os
 from collections import defaultdict
 from tqdm import tqdm
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def download_image(url, save_path, timeout=10):
@@ -52,23 +57,9 @@ def download_image(url, save_path, timeout=10):
         return False
 
 
-def load_image_items(meta_file, image_dir):
-    """从meta数据中提取有图片的item集合，实际下载验证图片可用性
-    
-    参考 MACRec/data_process/load_all_figures.py:
-    不仅检查 imageURLHighRes 字段是否存在，还实际下载图片并验证完整性。
-    只有下载成功且文件完整的 item 才会被保留。
-    
-    Args:
-        meta_file: meta JSON 文件路径
-        image_dir: 图片保存目录
-    Returns:
-        items_with_image: 实际有可用图片的 item asin 集合
-    """
-    print(f"📷 读取元数据，下载并验证图片: {meta_file}")
-    os.makedirs(image_dir, exist_ok=True)
-    
-    # 先读取所有 meta，收集有 URL 的 item
+def load_image_items_url(meta_file):
+    """从meta数据中提取有图片URL的item集合 (仅检查URL存在性，不下载)"""
+    print(f"📷 读取元数据，筛选有图片URL的item: {meta_file}")
     asin2url = {}
     total = 0
     with open(meta_file, 'r', encoding='utf-8') as f:
@@ -82,38 +73,74 @@ def load_image_items(meta_file, image_dir):
                 image_urls = item.get('imageURLHighRes', [])
                 total += 1
                 if image_urls and len(image_urls) > 0:
-                    asin2url[asin] = image_urls[0]  # 取第一张高清图
+                    asin2url[asin] = image_urls[0]
             except json.JSONDecodeError:
                 continue
     
     print(f"  - 元数据总item数: {total}")
     print(f"  - 有图片URL的item数: {len(asin2url)}")
     print(f"  - 无图片URL的item数: {total - len(asin2url)}")
+    return asin2url
+
+
+def download_and_verify(asin2url, target_asins, image_dir, max_workers=32):
+    """只下载 target_asins 中的图片，返回实际下载成功的 asin 集合
     
-    # 实际下载验证
-    items_with_image = set()
-    download_ok = 0
-    download_fail = 0
+    Args:
+        asin2url: asin -> 图片URL 的完整映射
+        target_asins: 需要下载的 asin 集合 (5-core 过滤后的最终 item)
+        image_dir: 图片保存目录
+        max_workers: 并发线程数
+    Returns:
+        verified_asins: 实际有可用图片的 asin 集合
+    """
+    os.makedirs(image_dir, exist_ok=True)
+    
+    verified = set()
+    to_download = {}
     already_exist = 0
+    no_url = 0
     
-    for asin, url in tqdm(asin2url.items(), desc="下载验证图片"):
-        save_path = os.path.join(image_dir, f"{asin}.jpg")
-        
-        # 已下载过且文件有效，跳过
-        if os.path.exists(save_path) and os.path.getsize(save_path) > 2:
-            items_with_image.add(asin)
-            already_exist += 1
+    for asin in target_asins:
+        if asin not in asin2url:
+            no_url += 1
             continue
-        
-        if download_image(url, save_path):
-            items_with_image.add(asin)
-            download_ok += 1
+        save_path = os.path.join(image_dir, f"{asin}.jpg")
+        if os.path.exists(save_path) and os.path.getsize(save_path) > 2:
+            verified.add(asin)
+            already_exist += 1
         else:
-            download_fail += 1
+            to_download[asin] = asin2url[asin]
     
-    print(f"  - 下载结果: 新下载={download_ok}, 已存在={already_exist}, 失败={download_fail}")
-    print(f"  - 实际可用图片的item数: {len(items_with_image)}")
-    return items_with_image
+    print(f"\n📥 下载图片 (仅 5-core 后的 {len(target_asins)} 个item)")
+    print(f"  - 已存在: {already_exist}, 待下载: {len(to_download)}, 无URL: {no_url}")
+    
+    if to_download:
+        download_ok = 0
+        download_fail = 0
+        
+        def _download_one(asin_url):
+            asin, url = asin_url
+            save_path = os.path.join(image_dir, f"{asin}.jpg")
+            return asin, download_image(url, save_path)
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_download_one, item): item 
+                       for item in to_download.items()}
+            with tqdm(total=len(futures), desc="下载验证图片") as pbar:
+                for future in as_completed(futures):
+                    asin, success = future.result()
+                    if success:
+                        verified.add(asin)
+                        download_ok += 1
+                    else:
+                        download_fail += 1
+                    pbar.update(1)
+        
+        print(f"  - 下载结果: 成功={download_ok}, 失败={download_fail}")
+    
+    print(f"  - 实际可用图片: {len(verified)} / {len(target_asins)}")
+    return verified
 
 
 def load_and_preprocess(review_file, items_with_image, min_interactions=5):
@@ -295,23 +322,45 @@ def main():
         shutil.copy2(META_FILE, meta_dst)
         print(f"📋 已复制元数据到: {meta_dst}")
     
-    # 步骤1: 下载图片并获取有可用图片的item集合
+    # 步骤1: 用URL存在性初筛 + 5-core过滤 (不下载图片，速度快)
+    asin2url = load_image_items_url(META_FILE)
+    items_with_url = set(asin2url.keys())
+    df = load_and_preprocess(REVIEW_FILE, items_with_url, MIN_INTERACTIONS)
+    
+    # 步骤2: 只下载 5-core 后最终 item 的图片并验证
     IMAGE_DIR = os.path.join(OUT_DIR, 'images')
-    items_with_image = load_image_items(META_FILE, IMAGE_DIR)
+    final_items = set(df['item_id'].unique())
+    verified_items = download_and_verify(asin2url, final_items, IMAGE_DIR)
     
-    # 步骤2: 加载和预处理 (含图片过滤)
-    df = load_and_preprocess(REVIEW_FILE, items_with_image, MIN_INTERACTIONS)
+    # 步骤3: 踢掉下载失败的item，如果有的话再补一轮 5-core
+    failed_items = final_items - verified_items
+    if failed_items:
+        print(f"\n⚠️  {len(failed_items)} 个item图片下载失败，重新过滤...")
+        df = df[df['item_id'].isin(verified_items)]
+        # 补一轮 5-core (下载失败可能导致某些用户/item不满足5次)
+        prev_len = -1
+        iteration = 0
+        while len(df) != prev_len:
+            iteration += 1
+            prev_len = len(df)
+            user_counts = df['user_id'].value_counts()
+            df = df[df['user_id'].isin(user_counts[user_counts >= MIN_INTERACTIONS].index)]
+            item_counts = df['item_id'].value_counts()
+            df = df[df['item_id'].isin(item_counts[item_counts >= MIN_INTERACTIONS].index)]
+        print(f"  补充过滤后: {len(df):,} 条, {df['user_id'].nunique():,} 用户, {df['item_id'].nunique():,} 物品")
+    else:
+        print(f"\n✅ 所有 {len(final_items)} 个item图片均可用，无需补充过滤")
     
-    # 步骤3: 划分数据集
+    # 步骤4: 划分数据集
     df = split_data(df)
     
-    # 步骤4: 保存.inter文件
+    # 步骤5: 保存.inter文件
     save_inter_file(df, OUT_DIR, DATASET_NAME)
     
-    # 步骤5: 构建序列
+    # 步骤6: 构建序列
     train_seqs, valid_seqs, test_seqs = build_sequences(df, MAX_SEQ_LENGTH)
     
-    # 步骤6: 保存JSONL文件
+    # 步骤7: 保存JSONL文件
     print("💾 保存JSONL文件...")
     save_jsonl(train_seqs, os.path.join(OUT_DIR, f'{DATASET_NAME}.train.jsonl'))
     save_jsonl(valid_seqs, os.path.join(OUT_DIR, f'{DATASET_NAME}.valid.jsonl'))
@@ -339,8 +388,8 @@ def main():
     print("=" * 70)
     print(f"\n输出目录: {OUT_DIR}")
     print(f"后续步骤:")
-    print(f"  1. python get_collab_emb.py       (修改路径指向 {DATASET_NAME})")
-    print(f"  2. python get_text_emb.py         (修改路径指向 {DATASET_NAME})")
+    print(f"  1. python get_collab_emb.py --dataset {DATASET_NAME}")
+    print(f"  2. python get_text_emb.py --dataset {DATASET_NAME}")
     print(f"  3. python get_image_emb.py --dataset {DATASET_NAME}")
 
 

@@ -41,7 +41,7 @@ def parse_args():
                         help="编码batch size (默认: st=32, qwen=8)")
     parser.add_argument("--pca_dim", type=int, default=None,
                         help="PCA降维目标维度 (仅qwen, 不指定则不降维)")
-    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--device", type=str, default="cuda:1")
     return parser.parse_args()
 
 
