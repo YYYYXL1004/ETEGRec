@@ -97,11 +97,6 @@ def train(config, verbose=True, rank=0, skip_id=False, debug=False, debug_sample
         
         collab_emb = np.load(collab_emb_path)
         text_emb = np.load(text_emb_path)
-        
-        if len(text_emb) == len(collab_emb) + 1:
-            logger.info("Detected PAD token in Text embeddings. Slicing [1:] to align.")
-            text_emb = text_emb[1:]
-        
         assert len(collab_emb) == len(text_emb), f"Length mismatch: {len(collab_emb)} vs {len(text_emb)}"
         
         if config.get('normalize', False):

@@ -74,8 +74,8 @@ def train_grpo(config, sft_ckpt, rqvae_ckpt, code_json, verbose=True, rank=0):
         text_emb_path = os.path.join(dataset_path, text_emb_file)
         collab_emb = np.load(collab_emb_path)
         text_emb = np.load(text_emb_path)
-        if len(text_emb) == len(collab_emb) + 1:
-            text_emb = text_emb[1:]
+        assert len(collab_emb) == len(text_emb), \
+            f"Length mismatch: collab {len(collab_emb)} vs text {len(text_emb)}"
         if config.get('normalize', False):
             collab_emb = collab_emb / (np.linalg.norm(collab_emb, axis=1, keepdims=True) + 1e-9)
             text_emb = text_emb / (np.linalg.norm(text_emb, axis=1, keepdims=True) + 1e-9)

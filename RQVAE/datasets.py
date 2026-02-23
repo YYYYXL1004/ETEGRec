@@ -26,12 +26,6 @@ class DualEmbDataset(data.Dataset):
     def __init__(self, collab_path, semantic_path, normalize=False):
         self.collab_embeddings = np.load(collab_path)
         self.semantic_embeddings = np.load(semantic_path)
-        
-        # Handle PAD token mismatch
-        # User hint: "第一个是[PAD]" and Semantic has 1 more item than Collab
-        if len(self.semantic_embeddings) == len(self.collab_embeddings) + 1:
-            print(f"Detected PAD token in Semantic embeddings. Slicing [1:] to align with Collab.")
-            self.semantic_embeddings = self.semantic_embeddings[1:]
             
         assert len(self.collab_embeddings) == len(self.semantic_embeddings), \
             f"Length mismatch: Collab {len(self.collab_embeddings)} vs Semantic {len(self.semantic_embeddings)}"
@@ -63,14 +57,6 @@ class TripleEmbDataset(data.Dataset):
         self.collab_embeddings = np.load(collab_path)
         self.semantic_embeddings = np.load(semantic_path)
         self.image_embeddings = np.load(image_path)
-        
-        # Handle PAD token mismatch
-        if len(self.semantic_embeddings) == len(self.collab_embeddings) + 1:
-            print(f"Detected PAD token in Semantic embeddings. Slicing [1:].")
-            self.semantic_embeddings = self.semantic_embeddings[1:]
-        if len(self.image_embeddings) == len(self.collab_embeddings) + 1:
-            print(f"Detected PAD token in Image embeddings. Slicing [1:].")
-            self.image_embeddings = self.image_embeddings[1:]
             
         assert len(self.collab_embeddings) == len(self.semantic_embeddings) == len(self.image_embeddings), \
             f"Length mismatch: Collab {len(self.collab_embeddings)} vs Semantic {len(self.semantic_embeddings)} vs Image {len(self.image_embeddings)}"
@@ -108,14 +94,6 @@ class CrossModalEmbDataset(data.Dataset):
         self.collab_emb = np.load(collab_path)
         self.text_emb = np.load(text_path)
         self.image_emb = np.load(image_path)
-
-        # Handle PAD token mismatch
-        if len(self.text_emb) == len(self.collab_emb) + 1:
-            print("Detected PAD token in Text embeddings. Slicing [1:].")
-            self.text_emb = self.text_emb[1:]
-        if len(self.image_emb) == len(self.collab_emb) + 1:
-            print("Detected PAD token in Image embeddings. Slicing [1:].")
-            self.image_emb = self.image_emb[1:]
 
         assert len(self.collab_emb) == len(self.text_emb) == len(self.image_emb), \
             f"Length mismatch: collab {len(self.collab_emb)}, text {len(self.text_emb)}, image {len(self.image_emb)}"

@@ -104,7 +104,8 @@ def main(args):
     model.eval()
 
     print(f"\n🖼️  提取图像embedding...")
-    embeddings = []
+    # index 0 = [PAD] 零向量, 与 text_emb / collab_emb 格式一致
+    embeddings = [torch.zeros(768)]  # PAD at index 0
     missing_items = []
 
     with torch.no_grad():

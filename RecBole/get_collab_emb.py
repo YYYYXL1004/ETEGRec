@@ -173,14 +173,15 @@ def train_sasrec(recbole_dataset_name, data_path, args):
 
 def extract_embeddings(model, dataset, output_dir, dataset_name):
     """提取 item embedding 和 item2id 映射，保存到 output_dir"""
-    # embedding: 去掉 index 0 (padding)
+    # embedding: 保留 index 0 (padding, 零向量), 与 text_emb 格式一致
     item_emb = model.item_embedding.weight.data.cpu().numpy()
-    item_emb_no_pad = item_emb[1:]
+    # index 0 是 RecBole 的 padding token, 置零确保一致
+    item_emb[0] = 0.0
 
-    emb_dim = item_emb_no_pad.shape[1]
+    emb_dim = item_emb.shape[1]
     npy_path = os.path.join(output_dir, f'{dataset_name}_collab_emb_{emb_dim}.npy')
-    np.save(npy_path, item_emb_no_pad)
-    print(f"已保存嵌入: {npy_path} (shape={item_emb_no_pad.shape})")
+    np.save(npy_path, item_emb)
+    print(f"已保存嵌入: {npy_path} (shape={item_emb.shape}, index 0 = [PAD] 零向量)")
 
     # item2id 映射 (含 [PAD]=0)
     item_token2id = dataset.field2token_id['item_id']
@@ -194,7 +195,7 @@ def extract_embeddings(model, dataset, output_dir, dataset_name):
         json.dump(item2id_map, f, indent=2, ensure_ascii=False)
     print(f"已保存映射: {map_path} (共 {len(item2id_map)} 个item, 含 [PAD])")
 
-    assert len(item2id_map) == item_emb_no_pad.shape[0] + 1, "映射与嵌入数量不一致"
+    assert len(item2id_map) == item_emb.shape[0], "映射与嵌入数量不一致"
     return npy_path, map_path
 
 
