@@ -96,3 +96,52 @@ class TripleEmbDataset(data.Dataset):
 
     def __len__(self):
         return len(self.collab_embeddings)
+
+
+class CrossModalEmbDataset(data.Dataset):
+    """
+    双路 Dataset: 分别返回 (collab+text, collab+image, item_index)
+    用于 CrossRQVAE 预训练。
+    """
+
+    def __init__(self, collab_path, text_path, image_path, normalize=False):
+        self.collab_emb = np.load(collab_path)
+        self.text_emb = np.load(text_path)
+        self.image_emb = np.load(image_path)
+
+        # Handle PAD token mismatch
+        if len(self.text_emb) == len(self.collab_emb) + 1:
+            print("Detected PAD token in Text embeddings. Slicing [1:].")
+            self.text_emb = self.text_emb[1:]
+        if len(self.image_emb) == len(self.collab_emb) + 1:
+            print("Detected PAD token in Image embeddings. Slicing [1:].")
+            self.image_emb = self.image_emb[1:]
+
+        assert len(self.collab_emb) == len(self.text_emb) == len(self.image_emb), \
+            f"Length mismatch: collab {len(self.collab_emb)}, text {len(self.text_emb)}, image {len(self.image_emb)}"
+
+        if normalize:
+            print("Normalizing embeddings to unit sphere...")
+            for attr in ['collab_emb', 'text_emb', 'image_emb']:
+                emb = getattr(self, attr)
+                setattr(self, attr, emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9))
+
+        # 两路输入维度 (collab + text 或 collab + image)
+        self.text_route_dim = self.collab_emb.shape[-1] + self.text_emb.shape[-1]
+        self.image_route_dim = self.collab_emb.shape[-1] + self.image_emb.shape[-1]
+        assert self.text_route_dim == self.image_route_dim, \
+            f"Dimension mismatch: text_route {self.text_route_dim} vs image_route {self.image_route_dim}"
+        self.dim = self.text_route_dim
+
+        print(f"CrossModalEmbDataset: collab({self.collab_emb.shape[-1]}) + "
+              f"text({self.text_emb.shape[-1]}) / image({self.image_emb.shape[-1]}) "
+              f"= {self.dim} per route, {len(self)} items")
+
+    def __getitem__(self, index):
+        collab = self.collab_emb[index]
+        text_route = np.concatenate((collab, self.text_emb[index]), axis=0)
+        image_route = np.concatenate((collab, self.image_emb[index]), axis=0)
+        return torch.FloatTensor(text_route), torch.FloatTensor(image_route), index
+
+    def __len__(self):
+        return len(self.collab_emb)
