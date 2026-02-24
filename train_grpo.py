@@ -108,9 +108,7 @@ def train_grpo(config, sft_ckpt, rqvae_ckpt, code_json, verbose=True, rank=0):
     t5 = T5ForConditionalGeneration(config=model_config)
     model_rec = Model(config=config, model=t5, n_items=num_items,
                       code_length=code_length, code_number=code_num)
-    model_rec.semantic_embedding.weight.data[1:] = torch.tensor(semantic_emb).to(config['device'])
-    
-    # Build RQ-VAE
+    model_rec.semantic_embedding.weight.data = torch.tensor(semantic_emb).to(config['device'])
     model_id = RQVAE(config=config, in_dim=model_rec.semantic_hidden_size)
     
     # Load SFT checkpoint
@@ -138,7 +136,7 @@ def train_grpo(config, sft_ckpt, rqvae_ckpt, code_json, verbose=True, rank=0):
     ref_t5 = T5ForConditionalGeneration(config=model_config)
     ref_model = Model(config=config, model=ref_t5, n_items=num_items,
                       code_length=code_length, code_number=code_num)
-    ref_model.semantic_embedding.weight.data[1:] = torch.tensor(semantic_emb).to(config['device'])
+    ref_model.semantic_embedding.weight.data = torch.tensor(semantic_emb).to(config['device'])
     safe_load(ref_model, sft_ckpt, verbose=False)
     ref_model = ref_model.to(config['device'])
     ref_model.eval()

@@ -135,7 +135,7 @@ def train(config, verbose=True, rank=0, skip_id=False, debug=False, debug_sample
     )
     
     # 加载语义 Embedding 到模型
-    model_rec.semantic_embedding.weight.data[1:] = torch.tensor(semantic_emb).to(config['device'])
+    model_rec.semantic_embedding.weight.data = torch.tensor(semantic_emb).to(config['device'])
     
     log(f"LlamaRecModel initialized", accelerator, logger)
     log(f"RQ-VAE initialized", accelerator, logger)

@@ -29,9 +29,10 @@ from collections import defaultdict
 def generate_pseudo_labels(emb_path, n_clusters, random_state=42):
     """
     对 embedding 做 KMeans 聚类，返回 item2item_list。
+    index 0 为 PAD token（零向量），不参与聚类，单独赋值 [0]。
     
     Args:
-        emb_path: embedding npy 文件路径
+        emb_path: embedding npy 文件路径 (index 0 = PAD)
         n_clusters: KMeans 聚类数
         random_state: 随机种子
     
@@ -42,19 +43,22 @@ def generate_pseudo_labels(emb_path, n_clusters, random_state=42):
     embeddings = np.load(emb_path)
     print(f"Loaded embeddings: {embeddings.shape} from {emb_path}")
 
-    # KMeans 聚类
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10, verbose=0)
-    labels = kmeans.fit_predict(embeddings)
+    # 跳过 index 0 (PAD 零向量)，只对真实 item 聚类
+    real_emb = embeddings[1:]
+    print(f"  Clustering {real_emb.shape[0]} real items into {n_clusters} clusters (excluding PAD)...")
 
-    # 构建 cluster -> item list 映射
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10, verbose=0)
+    labels = kmeans.fit_predict(real_emb)
+
+    # 构建 cluster -> item list 映射 (real item 原始 index = i+1)
     cluster2items = defaultdict(list)
-    for item_idx, cluster_id in enumerate(labels):
-        cluster2items[cluster_id].append(item_idx)
+    for i, cluster_id in enumerate(labels):
+        cluster2items[cluster_id].append(i + 1)
 
     # 构建 item -> 同 cluster item list 映射
-    item2item_list = {}
-    for item_idx, cluster_id in enumerate(labels):
-        item2item_list[item_idx] = cluster2items[cluster_id]
+    item2item_list = {0: [0]}  # PAD 单独一组，不参与对比学习
+    for i, cluster_id in enumerate(labels):
+        item2item_list[i + 1] = cluster2items[cluster_id]
 
     avg_cluster_size = np.mean([len(v) for v in cluster2items.values()])
     print(f"  n_clusters: {n_clusters}, avg_cluster_size: {avg_cluster_size:.1f}")
