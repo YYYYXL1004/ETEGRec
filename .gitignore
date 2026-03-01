@@ -43,6 +43,9 @@ MiniOneRec/
 docs/paper/*.pdf
 docs/实验日志.docx
 docs/实验指标记录 - Instrument2018.csv
+docs/MM
+scripts/analysis_output
+scripts/analysis_output_blip
 
 # Temporary files
 new.py
